@@ -1,0 +1,15 @@
+node_modules/
+src/generated/
+
+# 构建产物（插件包内容，由 scripts/build.mjs 生成）
+index.js
+index.js.map
+index.css
+i18n/
+package.zip
+
+# 编辑器
+.vscode/
+.idea/
+*.log
+.DS_Store

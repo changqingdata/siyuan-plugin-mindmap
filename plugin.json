@@ -1,0 +1,35 @@
+{
+  "name": "siyuan-plugin-mindmap",
+  "author": "MindMap Plugin",
+  "url": "https://github.com/your-name/siyuan-plugin-mindmap",
+  "version": "0.1.0",
+  "minAppVersion": "3.1.0",
+  "backends": [
+    "all"
+  ],
+  "frontends": [
+    "all"
+  ],
+  "disabledInPublish": true,
+  "displayName": {
+    "default": "Outline Mind Map",
+    "zh-CN": "大纲导图"
+  },
+  "description": {
+    "default": "Render outline blocks (unordered / ordered / task list) as professional mind maps.",
+    "zh-CN": "把无序列表、有序列表、任务列表三种大纲块渲染为专业级思维导图。"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh-CN": "README_zh_CN.md"
+  },
+  "icon": "icon.png",
+  "preview": "preview.png",
+  "keywords": [
+    "mindmap",
+    "outline",
+    "导图",
+    "思维导图",
+    "大纲"
+  ]
+}

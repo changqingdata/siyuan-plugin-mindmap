@@ -1,0 +1,38 @@
+{
+  "name": "siyuan-plugin-mindmap",
+  "version": "0.1.0",
+  "description": "Render outline blocks (unordered / ordered / task list) as professional mind maps.",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/build.mjs --watch",
+    "build": "node scripts/build.mjs",
+    "package": "node scripts/build.mjs --zip",
+    "test": "node tests/run.mjs",
+    "smoke": "node tests/smoke.cjs",
+    "visual": "node tests/visual.mjs && node tests/visual-check.mjs",
+    "live": "node tests/live.mjs",
+    "live:gpu": "node tests/live-gpu.mjs",
+    "kernel:shapes": "node tests/kernel/insert-shapes.mjs",
+    "kernel:restore": "node tests/kernel/restore-roundtrip.mjs",
+    "kernel:focus": "node tests/kernel/focus-timeline.mjs",
+    "check": "node scripts/gen-style.mjs && tsc --noEmit && node tests/run.mjs && node scripts/build.mjs --zip && node tests/smoke.cjs",
+    "check:all": "npm run check && npm run visual",
+    "deploy": "node scripts/deploy.mjs",
+    "verify": "node scripts/verify-install.mjs",
+    "typecheck": "node scripts/gen-style.mjs && tsc --noEmit",
+    "icon": "node scripts/make-icon.mjs"
+  },
+  "keywords": [
+    "siyuan",
+    "plugin",
+    "mindmap",
+    "outline",
+    "思维导图"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.24.2",
+    "siyuan": "^1.2.7",
+    "typescript": "^5.7.3"
+  }
+}
