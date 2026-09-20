@@ -9,6 +9,11 @@ export interface LayoutOptions {
     /** 画布内边距 */
     padX: number;
     padY: number;
+    /**
+     * 交叉轴（逻辑图里就是高度）的单列上限，超过就摊成多列。
+     * 传 0 或不传表示不分列。
+     */
+    maxCross?: number;
 }
 
 export interface LayoutResult {
@@ -29,6 +34,7 @@ export interface LayoutResult {
  */
 export function layout(root: MMNode, opt: LayoutOptions): LayoutResult {
     const { mode, gapX, gapY, padX, padY } = opt;
+    const maxCross = opt.maxCross ?? 0;
     const isTree = mode === "tree";
 
     const crossSelf = (n: MMNode) => (isTree ? n.w : n.h);
@@ -88,6 +94,95 @@ export function layout(root: MMNode, opt: LayoutOptions): LayoutResult {
         for (const k of n.kids) placeDepth(k, n.d1 + gapX);
     }
 
+    /* ---------- 3b. 逻辑图分列 ---------- */
+
+    /**
+     * 把根的一级分支摊成若干列。
+     *
+     * 调用前提：`measure(root)` 已经跑过 —— `root.kids` 与每棵子树的 `cross` 都是最新的，
+     * 且 `root.cross` 正好等于「单列总高」。
+     *
+     * 分列只改一级分支的**列归属**，每列内部仍是完整的 tidy-tree 子树，
+     * 所以列内兄弟顺序、父子对齐关系与单列时一模一样，只是换了个原点。
+     * 根节点留在最左侧、垂直居中，与所有列相望。
+     */
+    function layoutColumns(r: MMNode, colGapX: number, colGapY: number, limit: number) {
+        const kids = r.kids;
+        const total = r.cross;
+        const want = Math.max(2, Math.ceil(total / limit));
+        const cap = total / want;
+
+        // 贪心装箱：按原顺序切段，尽量贴近 cap。
+        // 保留最后一列的「兜底」身份（只有 groups.length < want - 1 才允许开新列），
+        // 免得最后剩一个孤零零的节点自己占一列。
+        const groups: MMNode[][] = [];
+        let cur: MMNode[] = [];
+        let curH = 0;
+        for (const k of kids) {
+            const add = cur.length === 0 ? k.cross : k.cross + colGapY;
+            if (cur.length > 0 && curH + add > cap && groups.length < want - 1) {
+                groups.push(cur);
+                cur = [k];
+                curH = k.cross;
+            } else {
+                cur.push(k);
+                curH += add;
+            }
+        }
+        if (cur.length > 0) groups.push(cur);
+
+        const colH: number[] = [];
+        const colW: number[] = [];
+        for (const g of groups) {
+            let h = 0;
+            g.forEach((k, i) => {
+                h += k.cross + (i > 0 ? colGapY : 0);
+            });
+            colH.push(h);
+
+            let y = 0;
+            for (const k of g) {
+                placeCross(k, y);
+                y += k.cross + colGapY;
+            }
+            for (const k of g) placeDepth(k, 0);
+
+            let w = 0;
+            const depthEnd = (n: MMNode) => {
+                w = Math.max(w, n.d1);
+                n.kids.forEach(depthEnd);
+            };
+            g.forEach(depthEnd);
+            colW.push(w);
+        }
+
+        const maxH = Math.max(...colH);
+        const colX: number[] = [];
+        let x = r.w + colGapX;
+        for (let i = 0; i < groups.length; i++) {
+            colX.push(x);
+            x += colW[i] + colGapX * 2;
+        }
+
+        groups.forEach((g, i) => {
+            // 各列垂直居中：高度不齐时整体看起来是一块，而不是参差的锯齿
+            const yOff = (maxH - colH[i]) / 2;
+            const place = (n: MMNode) => {
+                n.x = n.d0 + colX[i];
+                n.y = n.cy - n.h / 2 + yOff;
+                n.dir = 1;
+                n.kids.forEach(place);
+            };
+            g.forEach(place);
+        });
+
+        r.kids = r.children;
+        r.dir = 1;
+        r.x = 0;
+        r.y = maxH / 2 - r.h / 2;
+        r.cy = r.y + r.h / 2;
+    }
+
     /* ---------- 4. 映射到 x / y ---------- */
     if (mode === "mind") {
         // 思维导图：根的一级分支左右均分，两侧各自独立布局后镜像
@@ -141,21 +236,29 @@ export function layout(root: MMNode, opt: LayoutOptions): LayoutResult {
         root.y = -root.h / 2;
     } else {
         measure(root);
-        placeCross(root, 0);
-        placeDepth(root, 0);
 
-        const toXY = (n: MMNode) => {
-            if (isTree) {
-                n.x = n.cy - n.w / 2;
-                n.y = n.d0;
-            } else {
-                n.y = n.cy - n.h / 2;
-                n.x = n.d0;
-            }
-            n.dir = 1;
-            n.kids.forEach(toXY);
-        };
-        toXY(root);
+        // 逻辑图分列：逻辑图的交叉轴是纵向的，节点一多画布就变成 700×3400 这种
+        // 细长条 —— 横向空间全空着，而视口恰恰是横的。`measure` 之后 root.cross
+        // 就是「单列总高」，超过阈值就摊成多列（见 layoutColumns）。
+        if (mode === "logic" && maxCross > 0 && root.children.length > 1 && root.cross > maxCross) {
+            layoutColumns(root, gapX, gapY, maxCross);
+        } else {
+            placeCross(root, 0);
+            placeDepth(root, 0);
+
+            const toXY = (n: MMNode) => {
+                if (isTree) {
+                    n.x = n.cy - n.w / 2;
+                    n.y = n.d0;
+                } else {
+                    n.y = n.cy - n.h / 2;
+                    n.x = n.d0;
+                }
+                n.dir = 1;
+                n.kids.forEach(toXY);
+            };
+            toXY(root);
+        }
     }
 
     /* ---------- 归一化到正坐标 ---------- */

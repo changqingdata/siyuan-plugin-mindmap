@@ -24,12 +24,18 @@ import {
     canOutdent,
     hasInlineFormat,
     isAncestor,
+    NEW_NODE_TEXT,
     serializeSubtree,
 } from "./tree";
 import { copyText } from "../utils/api";
 
 export interface ViewCallbacks {
-    /** 折叠状态变化，交给外部持久化 */
+    /**
+     * 折叠状态变了，交给外部**写回大纲**（思源原生 `fold`）。
+     *
+     * 视图自己不存折叠态：解析时从 DOM 的 `.li[fold="1"]` 读，改动时往大纲写。
+     * 这样「大纲什么状态、导图就什么状态」是结构上成立的，不需要两边对表。
+     */
     onFoldChange: (id: string, folded: boolean) => void;
     /** 定位到正文块 */
     onLocate: (id: string) => void;
@@ -83,6 +89,21 @@ const LAYOUT_LABEL: Record<MMLayout, string> = {
 
 const MIN_SCALE = 0.15;
 const MAX_SCALE = 6;
+
+/**
+ * 「可读优先」缩放下限。
+ *
+ * 正文 16px × 0.55 ≈ 8.8px —— 再小就跌破 8px 可读线了。
+ * 实测「铺满视口」策略下：31 节点掉到 7.4px、64 节点 3.4px、109 节点 2.4px，
+ * 而 30–100 节点恰恰是最常见的规模。所以首次进入大图时按这个下限兜底：
+ * 宁可让用户平移，也不把整张图压成一片色块。
+ *
+ * 「适应画布」按钮不受此限 —— 那是用户主动要全貌，缩到多小都是他自己的选择。
+ */
+const READABLE_SCALE = 0.55;
+
+/** 长按多少毫秒呼出节点菜单（触屏） */
+const LONG_PRESS_MS = 500;
 
 /** FLIP 时长，与 CSS 里的过渡时长无关 —— 位移完全由 JS 驱动 */
 const FLIP_DURATION = 230;
@@ -185,6 +206,7 @@ export class MindMapView {
     private edgesEl: SVGSVGElement;
     private nodesEl: HTMLElement;
     private toolbarEl: HTMLElement;
+    private crumbEl: HTMLElement;
     private zoomBarEl: HTMLElement;
     private minimapEl: HTMLElement;
     private searchEl: HTMLElement;
@@ -197,7 +219,13 @@ export class MindMapView {
     private listEl: HTMLElement;
     private options: MMConfig;
     private cb: ViewCallbacks;
-    private foldSet: Set<string>;
+    /**
+     * 折叠覆盖表（**活引用**，每次 render 现读）。
+     *
+     * 真相源是 DOM 上的 `fold`；这里只是补「用户刚折完、内核还没把 DOM 更新回来」
+     * 那段空窗，否则那次重渲染会把刚折的节点又展开，看着像按钮失灵。
+     */
+    private getFoldOverlay: () => ReadonlyMap<string, boolean>;
 
     private tree: MMNode | null = null;
     private byId = new Map<string, MMNode>();
@@ -221,6 +249,9 @@ export class MindMapView {
 
     /** 正在编辑的节点（编辑期间跳过重渲染，避免打断输入） */
     private editing: MMNode | null = null;
+
+    /** 编辑期间被挡下的渲染请求，退出编辑时补做一次 */
+    private pendingRender = false;
     /** 正在拖拽的节点 */
     private dragging: MMNode | null = null;
     /** 当前拖拽落点 */
@@ -243,7 +274,15 @@ export class MindMapView {
     private edgePaths: SVGPathElement[] = [];
     private edgeSignature = "";
 
-    private searchHits: MMNode[] = [];
+    /**
+     * 搜索命中列表 —— 存的是**块 ID**，不是节点对象。
+     *
+     * 每次 render() 都会把整棵树重新解析出来，节点对象全是新的；如果这里存对象，
+     * 重渲染之后 `hitSet.has(n)` 永远为 false，高亮会**静默全部消失**
+     * （实测：搜到 1 条、计数显示 1/1，但画面上一个高亮框都没有）。
+     * 存 ID 就能在每次重渲染后按需重新解析。
+     */
+    private searchHits: string[] = [];
     private searchIdx = -1;
     private searchOpen = false;
     /** 小地图缩放比，更新视口框时复用 */
@@ -255,17 +294,29 @@ export class MindMapView {
     private autoScrollTimer = 0;
     private autoScrollDir = { x: 0, y: 0 };
 
+    /**
+     * 下钻路径：从「原文根」到「当前聚焦节点」的一串块 ID。
+     *
+     * 存 ID 而不是节点引用 —— 结构一变（Protyle 重建 DOM、内核回推）旧引用就作废了，
+     * 而 ID 每次 render 都能在刚解析出来的树上重新走一遍。
+     * 中途某一环被删掉时自动截断到最长的有效前缀，不会让用户卡在空白里。
+     */
+    private drillPath: string[] = [];
+
+    /** 搜索用的检索串缓存（正文 + 链接地址 + 图片 alt），节点对象重建即失效 */
+    private hayCache = new WeakMap<MMNode, string>();
+
     constructor(
         listEl: HTMLElement,
         options: MMConfig,
-        foldSet: Set<string>,
+        getFoldOverlay: () => ReadonlyMap<string, boolean>,
         cb: ViewCallbacks,
         private title: string,
-        private mode: "inline" | "dialog" = "inline",
+        private mode: "inline" | "dialog" | "side" = "inline",
     ) {
         this.listEl = listEl;
         this.options = { ...options };
-        this.foldSet = foldSet;
+        this.getFoldOverlay = getFoldOverlay;
         this.cb = cb;
 
         this.rootEl = document.createElement("div");
@@ -280,6 +331,9 @@ export class MindMapView {
 
         this.toolbarEl = document.createElement("div");
         this.toolbarEl.className = "mm-toolbar";
+
+        this.crumbEl = document.createElement("div");
+        this.crumbEl.className = "mm-crumb";
 
         this.viewportEl = document.createElement("div");
         this.viewportEl.className = "mm-viewport";
@@ -309,7 +363,7 @@ export class MindMapView {
 
         this.worldEl.append(this.edgesEl, this.nodesEl);
         this.viewportEl.append(this.worldEl, this.emptyEl, this.minimapEl, this.zoomBarEl, this.searchEl);
-        this.rootEl.append(this.toolbarEl, this.viewportEl);
+        this.rootEl.append(this.toolbarEl, this.crumbEl, this.viewportEl);
     }
 
     /* ==================================================================== 挂载 */
@@ -324,7 +378,7 @@ export class MindMapView {
         this.buildSearch();
         if (container) {
             this.detached = true;
-            this.rootEl.classList.add("mm-root--dialog");
+            this.rootEl.classList.add(this.mode === "side" ? "mm-root--side" : "mm-root--dialog");
         } else {
             container = this.listEl;
             this.listEl.classList.add("mm-source-hidden");
@@ -626,8 +680,15 @@ export class MindMapView {
      */
     render(fitView = false) {
         if (this.destroyed) return;
-        // 编辑期间不重建 DOM，否则会打断正在进行的输入
-        if (this.editing) return;
+        // 编辑期间不重建 DOM，否则会打断正在进行的输入。
+        // ⚠️ 但必须记一笔：退出编辑时要补一次渲染，否则「编辑期间发生的内容变化」
+        // （点悬停的 + 插入了子节点、别的窗口改了这篇文档）会一直不显示 ——
+        // 因为 render() 被挡下之后，没有任何东西会再触发它。
+        if (this.editing) {
+            this.pendingRender = true;
+            return;
+        }
+        this.pendingRender = false;
 
         const theme = resolveTheme(this.options.theme);
         const font = getComputedStyle(document.body).fontFamily || "sans-serif";
@@ -664,12 +725,24 @@ export class MindMapView {
         }
         this.emptyEl.style.display = "none";
 
-        const root = wrapRoot(items, this.title);
+        const root0 = wrapRoot(items, this.title);
+        // 下钻：把当前聚焦的那个节点当成新的根。必须在 decorate 之前完成 ——
+        // decorate 会按新的根重新分配 depth / branch / order / color，
+        // 换根之后这些量必须整体重算（否则一级分支会被算成第 3 层，配色和缩进全乱）。
+        const root = this.applyDrill(root0);
         decorate(root, theme.palette, this.options.branchColor);
 
-        // 应用持久化的折叠状态
-        for (const n of flatten(root)) {
-            if (n.id && this.foldSet.has(n.id)) n.folded = true;
+        // 折叠态：parseList 已经从 `.li[fold="1"]` 读出来了，这里只把覆盖表盖上。
+        //
+        // 注意是**双向**的 —— 覆盖表里既可能是 true（刚折）也可能是 false（刚展），
+        // 所以不能像以前那样只判 `has()`。
+        const overlay = this.getFoldOverlay();
+        if (overlay.size > 0) {
+            for (const n of flatten(root)) {
+                if (!n.id) continue;
+                const want = overlay.get(n.id);
+                if (want !== undefined) n.folded = want;
+            }
         }
 
         this.tree = root;
@@ -694,10 +767,25 @@ export class MindMapView {
 
         // .mm-node 用 width: max-content，测量结果与容器宽度无关，
         // 所以这里不需要先把 world 撑开。
+        //
+        // ⚠️ 但必须先把 world 上的 `zoom` 归 1 —— 这是实打实测出来的坑：
+        // Chromium 下 `offsetWidth` / `offsetHeight` **会被祖先的 zoom 影响**，
+        // 而且不是等比缩放，是「按 zoom 折算成物理像素 → 四舍五入 → 再折回来」。
+        // 于是 `zoom: 0.55` 时一个真实 165×57 的节点会量成 167×59
+        // （最多多出 1/zoom ≈ 1.8px）。
+        //
+        // 布局用的正是这些量测值，所以不清 zoom 的话，同一棵树会算出两个画布：
+        //   首次渲染（还没缩放过，zoom 为空）→ 1752×2096
+        //   之后每次渲染（zoom 已是 0.55）  → 1761×2122
+        // 用户看到的就是「刚打开一个样，随便点一下又变成另一个样」——
+        // 典型的「布局依赖渲染次序」。实测还发现它会连累分列位置整体偏移 1/3/5/7px。
+        const prevZoom = this.worldEl.style.zoom;
+        if (prevZoom && prevZoom !== "1") this.worldEl.style.zoom = "1";
         for (const n of all) {
             n.w = n.el!.offsetWidth;
             n.h = n.el!.offsetHeight;
         }
+        if (prevZoom && prevZoom !== "1") this.worldEl.style.zoom = prevZoom;
 
         /* --- 3. 布局 --- */
         const compact = this.options.compact || all.length > this.options.compactThreshold;
@@ -706,7 +794,18 @@ export class MindMapView {
         this.gapX = gapX;
         this.trunkLen = Math.max(13, Math.min(gapX * 0.44, 42));
 
-        const box = layout(root, { mode: this.options.layout, gapX, gapY, padX: 72, padY: 64 });
+        const box = layout(root, {
+            mode: this.options.layout,
+            gapX,
+            gapY,
+            padX: 72,
+            padY: 64,
+            // 逻辑图分列：单列高度超过可视区的 2.4 倍就摊成多列。
+            // 下限 1200 是为了「视口还没量出来」的首次渲染兜底。
+            // ⚠️ 这里必须用 availHeight() 而不是 viewportEl.clientHeight —— 后者是
+            // 上一轮 resizeViewport 写进去的，会让列数决策依赖渲染次序。
+            maxCross: this.options.columnLayout ? Math.max(1200, this.availHeight() * 2.4) : 0,
+        });
         this.worldW = box.w;
         this.worldH = box.h;
 
@@ -734,14 +833,150 @@ export class MindMapView {
         this.resizeViewport(box.h);
         this.refreshSelection();
         this.applySearchMarks();
+        this.refreshBreadcrumb();
 
-        // 首次渲染一定自适应；之后只有用户主动改结构时才重置视图
-        if (this.options.autoFit && (fitView || !prev)) this.fit();
+        // 首次渲染一定自适应；之后只有用户主动改结构时才重置视图。
+        // 都走 readable —— 「重新取景」时没人想看到一张 3px 高的地图；
+        // 真正的「适应画布」（Ctrl+0 / 工具条按钮）走的是无参 fit()，不受此限。
+        if (this.options.autoFit && (fitView || !prev)) this.fit({ readable: true });
         else this.updateTransform();
 
         /* --- 6. 动效 --- */
         if (prev) this.runFlip(prev);
         this.refreshMinimap();
+    }
+
+    /* ================================================================ 下钻与渐进展开 */
+
+    /**
+     * 把 drillPath 沿新解析出来的树重走一遍，返回当前该当根的那个节点。
+     *
+     * 中途某一环没了（被删掉 / 被拖走）就截断到最长的有效前缀 ——
+     * 直接整段作废会让用户「莫名其妙回到了全图」，而卡住不返回又会一直显示空白。
+     */
+    private applyDrill(fallback: MMNode): MMNode {
+        if (this.drillPath.length === 0) return fallback;
+        let cur: MMNode = fallback;
+        const kept: string[] = [];
+        for (const id of this.drillPath) {
+            const next = cur.children.find((c) => c.id === id);
+            if (!next) break;
+            cur = next;
+            kept.push(id);
+        }
+        if (kept.length !== this.drillPath.length) this.drillPath = kept;
+        return kept.length > 0 ? cur : fallback;
+    }
+
+    /**
+     * 下钻：只看这一个分支。
+     *
+     * 交互放在 Ctrl/⌘ + 双击、悬停操作条上的 ⊙、以及右键菜单里 ——
+     * 裸双击留给改名（那是更高频的操作，也符合思源/大多数编辑器的习惯）。
+     */
+    private drillDown(n: MMNode) {
+        if (!n.id || n.children.length === 0) return;
+        // 从「当前根」走到 n 的这段相对路径，接到 drillPath 后面
+        const add: string[] = [];
+        let cur: MMNode | null = n;
+        while (cur && cur !== this.tree) {
+            if (cur.id) add.unshift(cur.id);
+            cur = cur.parent;
+        }
+        this.drillPath = this.drillPath.concat(add);
+        this.selected = null;
+        this.extraSel.clear();
+        this.clipboard = "";
+        this.render(true);
+    }
+
+    /** 回到第 depth 层（0 = 最外层全图） */
+    private drillTo(depth: number) {
+        const next = this.drillPath.slice(0, Math.max(0, depth));
+        if (next.length === this.drillPath.length) return;
+        this.drillPath = next;
+        this.selected = null;
+        this.extraSel.clear();
+        this.render(true);
+    }
+
+    private drillUp() {
+        if (this.drillPath.length === 0) return;
+        this.drillPath.pop();
+        this.selected = null;
+        this.extraSel.clear();
+        this.render(true);
+    }
+
+    /* ================================================================ 面包屑 */
+
+    /** 从当前根往上收集各级标题，长度 = drillPath.length + 1 */
+    private crumbLabels(): string[] {
+        const labels: string[] = [];
+        let cur: MMNode | null = this.tree;
+        while (cur) {
+            labels.unshift(cur.text?.trim() || "（空）");
+            cur = cur.parent;
+        }
+        return labels;
+    }
+
+    private refreshBreadcrumb() {
+        const on = this.drillPath.length > 0;
+        this.crumbEl.classList.toggle("mm-crumb--on", on);
+        if (!on) {
+            this.crumbEl.textContent = "";
+            return;
+        }
+
+        const labels = this.crumbLabels();
+        this.crumbEl.textContent = "";
+        labels.forEach((label, i) => {
+            if (i > 0) {
+                const sep = document.createElement("span");
+                sep.className = "mm-crumb-sep";
+                sep.textContent = "›";
+                this.crumbEl.appendChild(sep);
+            }
+            const b = document.createElement("button");
+            b.type = "button";
+            const last = i === labels.length - 1;
+            b.className = `mm-crumb-item${last ? " mm-crumb-cur" : ""}`;
+            b.textContent = label;
+            b.dataset.mmTip = last ? "当前聚焦的分支" : "回到这一层";
+            b.disabled = last;
+            b.onclick = (e) => {
+                e.stopPropagation();
+                this.drillTo(i);
+            };
+            this.crumbEl.appendChild(b);
+        });
+
+        const out = document.createElement("button");
+        out.type = "button";
+        out.className = "mm-crumb-out";
+        out.textContent = "退出聚焦";
+        out.dataset.mmTip = "回到全图（Esc）";
+        out.onclick = (e) => {
+            e.stopPropagation();
+            this.drillTo(0);
+        };
+        this.crumbEl.appendChild(out);
+    }
+
+    /** 定位到某个节点并直接进入编辑态（插入新节点后用，见 Scanner 的 pendingEdit） */
+    revealAndEdit(id: string): boolean {
+        if (this.destroyed) return false;
+        const n = this.byId.get(id);
+        if (!n) return false;
+        this.rootEl.classList.add("mm-kbd");
+        this.select(n);
+        this.ensureVisible(n);
+        // 刚建出来的节点只有占位文字，没有任何用户格式要保护，所以**强制就地编辑**，
+        // 不走「含行内格式 → 回源编辑」那条分流 —— 那条分流会退出导图，
+        // 用在「插入即编辑」上等于刚加完节点就把人赶走。
+        this.beginEdit(n, n.text === NEW_NODE_TEXT);
+        return true;
     }
 
     /** 记录当前每个节点的位置，用于 FLIP */
@@ -844,8 +1079,10 @@ export class MindMapView {
 
     /** 按内容高度调整可视区，返回是否发生了变化 */
     private resizeViewport(contentH: number): boolean {
-        const maxH = Math.max(280, window.innerHeight * 0.76);
-        const h = Math.min(Math.max(contentH, 260), maxH);
+        // 行内视图要按内容高度自适应，并封顶 —— 否则一个 200 节点的列表块会把
+        // 整篇文档顶下去几屏。全屏弹层 / 并排面板里画布就是容器本身，直接铺满。
+        const avail = this.availHeight();
+        const h = Math.min(Math.max(contentH, 260), avail);
         const prev = parseFloat(this.viewportEl.style.height || "0");
         if (Math.abs(prev - h) < 1) return false;
         this.viewportEl.style.height = `${Math.round(h)}px`;
@@ -996,6 +1233,19 @@ export class MindMapView {
             acts.appendChild(add);
 
             if (n.children.length > 0) {
+                const drill = document.createElement("button");
+                drill.type = "button";
+                drill.textContent = "⊙";
+                drill.dataset.mmTip = "聚焦此分支";
+                drill.dataset.mmKey = "Ctrl 双击";
+                drill.onclick = (e) => {
+                    e.stopPropagation();
+                    this.drillDown(n);
+                };
+                acts.appendChild(drill);
+            }
+
+            if (n.children.length > 0) {
                 const fold = document.createElement("button");
                 fold.type = "button";
                 fold.textContent = n.folded ? "▸" : "▾";
@@ -1018,6 +1268,12 @@ export class MindMapView {
             // 拖拽刚结束的那次 click 要丢掉
             if (this.suppressClick) return;
             const t = e.target as HTMLElement | null;
+
+            // ⚠️ 编辑态：这一击是用来放 caret / 选词的，绝不能把焦点抢到 rootEl 上。
+            // `rootEl.focus()` 会让 .mm-txt 立刻 blur → onBlur 提交并结束编辑，
+            // 于是「双击进入编辑后再点一下就被踢出来」，根本没法改字。
+            // 编辑的退出路径只有三条：点节点外面、Esc、Enter。
+            if (el.hasAttribute(EDIT_FLAG)) return;
 
             // 图片：单击放大看原图。导图里的图是缩略图，用户点它就是想知道「原图长什么样」，
             // 所以这里直接接管，不再去选中节点。
@@ -1042,6 +1298,13 @@ export class MindMapView {
         };
         el.ondblclick = (e) => {
             e.stopPropagation();
+            // Ctrl/⌘ + 双击 = 下钻（只看这一支）。
+            // 裸双击仍然留给改名 —— 那是更高频的操作，也是思源与大多数编辑器的习惯，
+            // 把它换成下钻会让「双击改名」这个肌肉记忆失效。
+            if ((e.ctrlKey || e.metaKey) && n.children.length > 0) {
+                this.drillDown(n);
+                return;
+            }
             if (this.options.editable && canEdit(n)) this.beginEdit(n);
             else if (n.id) this.cb.onLocate(n.id);
         };
@@ -1053,6 +1316,16 @@ export class MindMapView {
         };
         el.onmousedown = (e) => {
             if (e.button !== 0) return;
+
+            if (el.hasAttribute(EDIT_FLAG)) {
+                // 编辑态：点在正文里必须放行（要靠浏览器默认行为放 caret / 选词），
+                // 点在节点的其它区域（padding、悬停操作条）则拦下 —— 不拦的话
+                // 焦点会跑到最近的可聚焦祖先上，.mm-txt 一 blur 编辑就结束了。
+                const t = e.target as HTMLElement | null;
+                if (!t?.closest?.(".mm-txt")) e.preventDefault();
+                return;
+            }
+
             // 别让浏览器把光标放进 Protyle。
             //
             // .mm-root 自己是 contenteditable=false，但它的祖先 .protyle-wysiwyg 是可编辑的，
@@ -1060,12 +1333,39 @@ export class MindMapView {
             // document.activeElement 会变成 .protyle-wysiwyg，导图随即失去焦点，
             // 之后按什么键都落到 Protyle 手里，快捷键整套失效。
             // mousedown 上 preventDefault 正是拦这个默认行为的地方。
-            // 编辑态要正常选词，所以那时不拦。
-            if (!el.hasAttribute(EDIT_FLAG)) e.preventDefault();
+            e.preventDefault();
             if (!this.options.draggable || !n.id) return;
-            if (el.hasAttribute(EDIT_FLAG)) return;
             this.armDrag(n, e);
         };
+
+        /* ---- 触屏：长按呼出菜单 ----
+           移动端既没有 hover（悬停操作条摸不到）也不保证派发 contextmenu
+           （iOS Safari 长按是文字选择菜单）。所以自己起一个 500ms 计时器兜住，
+           顺带把「选中态常驻操作条」变成触屏上唯一的快捷入口。 */
+        let pressTimer = 0;
+        const cancelPress = () => {
+            if (pressTimer) {
+                window.clearTimeout(pressTimer);
+                pressTimer = 0;
+            }
+        };
+        el.addEventListener(
+            "touchstart",
+            (e: TouchEvent) => {
+                cancelPress();
+                if (e.touches.length !== 1) return;
+                const t = e.touches[0];
+                pressTimer = window.setTimeout(() => {
+                    pressTimer = 0;
+                    this.select(n);
+                    this.openNodeMenu(n, { clientX: t.clientX, clientY: t.clientY } as MouseEvent);
+                }, LONG_PRESS_MS);
+            },
+            { passive: true },
+        );
+        el.addEventListener("touchmove", cancelPress, { passive: true });
+        el.addEventListener("touchend", cancelPress, { passive: true });
+        el.addEventListener("touchcancel", cancelPress, { passive: true });
 
         return el;
     }
@@ -1181,6 +1481,9 @@ export class MindMapView {
         n.folded = !n.folded;
         if (n.id) this.cb.onFoldChange(n.id, n.folded);
         this.render();
+        // 折叠一个很大的子树之后，画布会明显小于视口 —— 不重新居中的话
+        // 整张图会缩在原来那个角落里。
+        this.reclampView();
     }
 
     private foldAll(folded: boolean) {
@@ -1194,7 +1497,10 @@ export class MindMapView {
             n.children.forEach(walk);
         };
         walk(root);
-        this.render();
+        // 「展开全部 / 折叠全部」是全局操作，画布尺寸会成倍变化，
+        // 必须重新取景 —— 否则展开之后用户只能看到左上角一小块，
+        // 剩下的全靠自己摸索着平移（实测：画布 2437×1552 而缩放还是 1）。
+        this.render(true);
     }
 
     /* ==================================================================== 键盘 */
@@ -1378,6 +1684,8 @@ export class MindMapView {
             if (this.searchOpen) return take(() => this.toggleSearch(false));
             if (this.extraSel.size) return take(() => this.clearSelection());
             if (this.selected) return take(() => this.clearSelection());
+            // 下钻状态下 Esc 逐层退回，比直接 blur 更符合「我在往里面走」的心智
+            if (this.drillPath.length > 0) return take(() => this.drillUp());
             return take(() => this.rootEl.blur());
         }
 
@@ -1467,13 +1775,16 @@ export class MindMapView {
      *   就地编辑提交时只能拿到 `textContent`，双链、公式、加粗会被**静默重建成纯文本**
      *   写进笔记（实测：`加粗 **粗体** 斜体 *斜体*` 改名后只剩 `改过`）。
      *   视觉上因为还原了 `savedHtml` 当场看不出来，所以这条必须堵死。
+     *
+     * @param force 跳过上面的分流，强制就地编辑。只给「插入即编辑」用 ——
+     *   刚建出来的节点只有占位文字，没有任何格式会被写坏，而回源编辑会退出导图。
      */
-    private beginEdit(n: MMNode) {
+    private beginEdit(n: MMNode, force = false) {
         if (!this.options.editable || !n.contentId) return;
         const el = n.el;
         if (!el || el.hasAttribute(EDIT_FLAG)) return;
 
-        if (hasInlineFormat(n)) {
+        if (!force && hasInlineFormat(n)) {
             this.cb.onEditInSource(n);
             return;
         }
@@ -1504,10 +1815,15 @@ export class MindMapView {
         txt.focus();
 
         let done = false;
+        let blurTimer = 0;
         const cleanup = () => {
             txt.removeEventListener("keydown", onKey);
             txt.removeEventListener("blur", onBlur);
             txt.removeEventListener("paste", onPaste);
+            if (blurTimer) {
+                window.clearTimeout(blurTimer);
+                blurTimer = 0;
+            }
         };
         const finish = (commit: boolean) => {
             if (done) return;
@@ -1521,6 +1837,16 @@ export class MindMapView {
             const next = (txt.textContent ?? "").replace(/\s+/g, " ").trim();
             txt.innerHTML = savedHtml; // 先还原；提交成功后外部会整体重渲染
             if (commit && !this.destroyed && next && next !== original) this.cb.onRename(n, next);
+
+            // 补做编辑期间被挡下的渲染。
+            // 延后一拍：此刻还在 blur / keydown 的处理栈里，直接重建 DOM
+            // 会和浏览器的焦点处理打架。
+            if (this.pendingRender) {
+                this.pendingRender = false;
+                window.setTimeout(() => {
+                    if (!this.destroyed && !this.editing) this.render();
+                }, 0);
+            }
         };
         const onKey = (e: KeyboardEvent) => {
             e.stopPropagation();
@@ -1532,7 +1858,23 @@ export class MindMapView {
                 finish(false);
             }
         };
-        const onBlur = () => finish(true);
+        /**
+         * 失焦提交。
+         *
+         * ⚠️ 必须延后一拍再判断，而且要先确认焦点没落回本节点内部：
+         * 点节点 padding、点悬停操作条这类操作都会让 txt 先 blur，
+         * 紧接着焦点又回到节点里 —— 直接提交的话，用户会莫名其妙被踢出编辑态。
+         */
+        const onBlur = () => {
+            if (blurTimer) window.clearTimeout(blurTimer);
+            blurTimer = window.setTimeout(() => {
+                blurTimer = 0;
+                if (done || this.destroyed) return;
+                const ae = document.activeElement;
+                if (ae && el.contains(ae)) return; // 焦点还在本节点里 → 继续编辑
+                finish(true);
+            }, 0);
+        };
         const onPaste = (e: ClipboardEvent) => {
             // 强制纯文本，避免把富文本结构粘进节点
             e.preventDefault();
@@ -1618,6 +1960,12 @@ export class MindMapView {
         );
         item("插入子节点", "Tab", false, () => act("insertChild"));
         item("在下方插入", "Enter", false, () => act("insertSiblingAfter"));
+        if (n.children.length > 0) {
+            item("聚焦此分支（只看这一支）", "Ctrl 双击", false, () => this.drillDown(n));
+        }
+        if (this.drillPath.length > 0) {
+            item("退出聚焦，回到全图", "Esc", false, () => this.drillTo(0));
+        }
         menu.addItem({ type: "separator" });
         item("上移", "Ctrl ↑", !canMoveUp(n), () => act("moveUp"));
         item("下移", "Ctrl ↓", !canMoveDown(n), () => act("moveDown"));
@@ -1828,13 +2176,33 @@ export class MindMapView {
         }
     }
 
+    /**
+     * 检索串：正文 + 链接地址 + 图片 alt / title。
+     *
+     * 之前只搜 `n.text`，于是「按双链目标找节点」「按图片名找节点」都搜不到 ——
+     * 而这两样恰好是导图里最常见的两种富内容。链接地址与 alt 只活在行内 HTML 里，
+     * 纯文本里一个字都看不到（双链的锚文本在 text 里，但目标块 ID / 标题不在）。
+     */
+    private searchHay(n: MMNode): string {
+        let hay = this.hayCache.get(n);
+        if (hay !== undefined) return hay;
+        hay = n.text.toLowerCase();
+        const html = n.html ?? "";
+        if (html) {
+            const extra = html.match(/(?:data-href|alt|title)="[^"]*"/g);
+            if (extra) hay += " " + extra.join(" ").toLowerCase();
+        }
+        this.hayCache.set(n, hay);
+        return hay;
+    }
+
     private runSearch(q: string) {
         const root = this.tree;
         this.searchHits = [];
         const needle = q.trim().toLowerCase();
         if (root && needle) {
             const walk = (n: MMNode) => {
-                if (n.text.toLowerCase().includes(needle)) this.searchHits.push(n);
+                if (n.id && this.searchHay(n).includes(needle)) this.searchHits.push(n.id);
                 n.children.forEach(walk);
             };
             walk(root);
@@ -1860,7 +2228,9 @@ export class MindMapView {
 
     /** 命中项可能在折叠的子树里，先展开祖先 */
     private gotoHit() {
-        const hit = this.searchHits[this.searchIdx];
+        const id = this.searchHits[this.searchIdx];
+        if (!id) return;
+        let hit = this.byId.get(id);
         if (!hit) return;
         let unfolded = false;
         let cur = hit.parent;
@@ -1872,8 +2242,19 @@ export class MindMapView {
             }
             cur = cur.parent;
         }
-        if (unfolded) this.render();
+        if (unfolded) {
+            this.render();
+            // render() 重建了整棵树，上面那个引用已经作废 —— 按 ID 重新取一次
+            hit = this.byId.get(id);
+            if (!hit) return;
+        }
         this.focusNode(hit);
+        // 命中项如果落在「不可读」的缩放下（大图按过 Ctrl+0 之后很常见），
+        // 先把视图拉回可读，否则用户看到的只是「一片色块上多了个高亮框」。
+        if (this.scale < READABLE_SCALE) {
+            this.setScale(READABLE_SCALE);
+            this.ensureVisible(hit);
+        }
     }
 
     private applySearchMarks() {
@@ -1884,8 +2265,8 @@ export class MindMapView {
         const walk = (n: MMNode) => {
             const el = n.el;
             if (el) {
-                el.classList.toggle("mm-hit", hitSet.has(n));
-                el.classList.toggle("mm-hit-cur", n === current);
+                el.classList.toggle("mm-hit", hitSet.has(n.id));
+                el.classList.toggle("mm-hit-cur", n.id === current);
             }
             n.kids.forEach(walk);
         };
@@ -2097,18 +2478,120 @@ export class MindMapView {
 
     /* ==================================================================== 变换 */
 
-    private fit() {
+    /**
+     * 适应视口。
+     *
+     * 两种语义：
+     *
+     * - **默认（适应画布）**：把整张图缩到刚好铺满，缩到多小都认。
+     *   这是用户主动要全貌时的行为（工具条按钮 / Ctrl+0 / 双击空白）。
+     * - **readable（可读优先）**：只在**首次进入**时用。缩放不低于 `READABLE_SCALE`，
+     *   宁可让用户平移也不把图压成一片色块；并且把视口对齐到**根节点**，
+     *   而不是整张画布的中心 —— 大图时画布中心离根节点很远（实测 64 节点画布
+     *   742×3406，中心在 y≈1700，那里是第五层的一堆叶子），
+     *   按画布中心对齐等于把用户直接丢进一片无关的枝叶里。
+     */
+    private fit(opts?: { readable?: boolean }) {
         const w = this.worldW;
         const h = this.worldH;
         const vw = this.viewportEl.clientWidth;
         const vh = this.viewportEl.clientHeight;
-        if (w <= 1 || h <= 1) return;
-        // 上限给到 2：小图（两三个节点）「适应画布」时放大到铺满更好看，
-        // 1.15 那种保守值在大屏上等于没适应。再大就该用户自己调了。
-        this.scale = Math.max(MIN_SCALE, Math.min(vw / w, vh / h, 2));
-        this.tx = (vw - w * this.scale) / 2;
-        this.ty = (vh - h * this.scale) / 2;
+        if (w <= 1 || h <= 1 || vw <= 1 || vh <= 1) return;
+
+        const exact = Math.min(vw / w, vh / h, 2);
+        const readable = opts?.readable === true && exact < READABLE_SCALE;
+
+        if (!readable) {
+            // 上限给到 2：小图（两三个节点）「适应画布」时放大到铺满更好看，
+            // 1.15 那种保守值在大屏上等于没适应。再大就该用户自己调了。
+            this.scale = Math.max(MIN_SCALE, exact);
+            this.tx = (vw - w * this.scale) / 2;
+            this.ty = (vh - h * this.scale) / 2;
+            this.updateTransform();
+            return;
+        }
+
+        this.scale = READABLE_SCALE;
+        const r = this.tree;
+        const rx = (r ? r.x + r.w / 2 : w / 2) * this.scale;
+        const ry = (r ? r.y + r.h / 2 : h / 2) * this.scale;
+
+        // 每种布局的生长方向不同，锚点也跟着不同：
+        // 逻辑图向右长（根靠左），树状图向下长（根靠上），思维导图左右对称（根居中）。
+        const layoutMode = this.options.layout;
+        const anchorX = layoutMode === "logic" ? vw * 0.3 : vw / 2;
+        const anchorY = layoutMode === "tree" ? vh * 0.26 : vh / 2;
+        this.tx = this.frameAxis(anchorX - rx, w * this.scale, vw);
+        this.ty = this.frameAxis(anchorY - ry, h * this.scale, vh);
         this.updateTransform();
+    }
+
+    /**
+     * 把一个轴的平移量钳进「不无谓留白、也不无谓裁切」的范围。
+     *
+     * 可读优先模式下内容常常比视口大，这时「根节点放在 30% 处」会同时造成两个后果：
+     * 左边白白空掉三成，右边却被裁掉更多 —— 用户看到的就是「错位」。
+     * 实测：内容宽 1017px、视口 942px 时，左空 228px 而右裁 225px。
+     *
+     * 钳制规则：
+     *   装得下 → 居中（此时锚点没有意义，居中最好看）
+     *   装不下 → 夹进 [v - c - M, M]，保证视口被内容铺满，不出现「一边空一大片」
+     *
+     * @param want 按锚点算出来的期望平移量
+     * @param c    该轴上的内容尺寸（已乘缩放）
+     * @param v    该轴上的视口尺寸
+     */
+    private frameAxis(want: number, c: number, v: number): number {
+        const M = 28;
+        if (c <= v - M * 2) return (v - c) / 2;
+        return Math.min(M, Math.max(v - c - M, want));
+    }
+
+    /**
+     * 可视区高度的「稳定值」。
+     *
+     * ⚠️ 不能直接读 `viewportEl.clientHeight` —— 那个值正是上一轮 `resizeViewport`
+     * 写进去的，用它算布局参数（maxCross / 分列阈值）会让**布局依赖渲染次序**：
+     * 首轮读到的还是 CSS 默认值，之后读到的是真实值，同一份数据会算出不同列数。
+     * 这里只依赖窗口 / 容器尺寸，与渲染历史无关。
+     */
+    private availHeight(): number {
+        if (this.detached) {
+            const chrome = this.toolbarEl.offsetHeight + this.crumbEl.offsetHeight;
+            const own = this.rootEl.clientHeight - chrome;
+            if (own > 40) return own;
+        }
+        return Math.max(280, window.innerHeight * 0.76);
+    }
+
+    /**
+     * 内容尺寸变了之后，把视图重新夹回合理范围（保持缩放）。
+     *
+     * 折叠 / 展开会让画布尺寸剧变，但 `scale / tx / ty` 是原样留着的 ——
+     * 于是视口停在原地、内容大范围溢出到屏幕外，看起来就是「节点错位」。
+     * 实测：展开全部后画布从 661×688 涨到 2437×1552，而缩放仍是 1，
+     * 用户只能看到 38%×47% 的一角。
+     *
+     * ⚠️ 只在「内容装得下」时居中。内容比视口大时不碰 —— 那多半是用户
+     * 特意放大后平移到某个角落看细节，替他把视图挪回去是帮倒忙。
+     */
+    private reclampView() {
+        const vw = this.viewportEl.clientWidth;
+        const vh = this.viewportEl.clientHeight;
+        if (vw <= 1 || vh <= 1) return;
+        const M = 28;
+        const cw = this.worldW * this.scale;
+        const ch = this.worldH * this.scale;
+        let moved = false;
+        if (cw <= vw - M * 2) {
+            this.tx = (vw - cw) / 2;
+            moved = true;
+        }
+        if (ch <= vh - M * 2) {
+            this.ty = (vh - ch) / 2;
+            moved = true;
+        }
+        if (moved) this.updateTransform();
     }
 
     private setScale(next: number, cx?: number, cy?: number) {
@@ -2225,6 +2708,93 @@ export class MindMapView {
             this.viewportEl.classList.remove("mm-grabbing");
         });
 
+        /* ---- 触屏：单指横向平移 + 双指捏合缩放 ----
+           `.mm-viewport` 上写了 `touch-action: pan-y`，所以纵向拖动由浏览器
+           直接接管（页面照常滚），我们只会收到横向拖动与多指手势的 touchmove。
+           这样既保住了「移动端能滚动长文档」，又让导图本身可平移可缩放。 */
+        let tAxis: "x" | "y" | null = null;
+        let pinch: { d: number; s: number } | null = null;
+
+        on(
+            this.viewportEl,
+            "touchstart",
+            (e: TouchEvent) => {
+                const t = e.target as HTMLElement | null;
+                if (t?.closest?.(".mm-zoombar, .mm-minimap, .mm-search, .mm-toolbar, .mm-crumb, .mm-lightbox")) {
+                    return;
+                }
+                if (e.touches.length === 2) {
+                    const [a, b] = [e.touches[0], e.touches[1]];
+                    pinch = { d: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), s: this.scale };
+                    this.drag = null;
+                    tAxis = null;
+                    return;
+                }
+                if (e.touches.length === 1 && !pinch) {
+                    const one = e.touches[0];
+                    this.drag = { x: one.clientX, y: one.clientY, tx: this.tx, ty: this.ty };
+                    tAxis = null;
+                }
+            },
+            { passive: true },
+        );
+
+        on(
+            this.viewportEl,
+            "touchmove",
+            (e: TouchEvent) => {
+                const t = e.target as HTMLElement | null;
+                if (t?.closest?.(".mm-zoombar, .mm-minimap, .mm-search, .mm-toolbar, .mm-crumb, .mm-lightbox")) return;
+
+                if (pinch && e.touches.length === 2) {
+                    e.preventDefault();
+                    const [a, b] = [e.touches[0], e.touches[1]];
+                    const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+                    if (pinch.d > 0 && d > 0) {
+                        const r = this.viewportEl.getBoundingClientRect();
+                        this.setScale(
+                            pinch.s * (d / pinch.d),
+                            (a.clientX + b.clientX) / 2 - r.left,
+                            (a.clientY + b.clientY) / 2 - r.top,
+                        );
+                    }
+                    return;
+                }
+
+                if (!this.drag || e.touches.length !== 1) return;
+                const one = e.touches[0];
+                const dx = one.clientX - this.drag.x;
+                const dy = one.clientY - this.drag.y;
+                // 手势方向只判定一次：定了横向就一路平移，定了纵向就交给页面滚动。
+                // 不判定的话手指稍微斜一点就会一边滚页面一边平移画布。
+                if (!tAxis) {
+                    if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+                    tAxis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+                }
+                if (tAxis !== "x") return;
+                e.preventDefault();
+                this.tx = this.drag.tx + dx;
+                this.ty = this.drag.ty + dy;
+                this.updateTransform();
+            },
+            { passive: false },
+        );
+
+        const endTouch = (e: TouchEvent) => {
+            if (e.touches.length === 0) {
+                pinch = null;
+                tAxis = null;
+                this.drag = null;
+            } else if (e.touches.length === 1 && pinch) {
+                // 双指放开一根：重新以剩下那根为基准，避免画面猛地跳一下
+                pinch = null;
+                tAxis = null;
+                this.drag = null;
+            }
+        };
+        on(this.viewportEl, "touchend", endTouch, { passive: true });
+        on(this.viewportEl, "touchcancel", endTouch, { passive: true });
+
         /* ---- 双击空白 = 适应画布 ---- */
         on(this.viewportEl, "dblclick", (e: MouseEvent) => {
             if ((e.target as HTMLElement).closest(".mm-node")) return;
@@ -2257,10 +2827,12 @@ export class MindMapView {
         if (typeof ResizeObserver !== "undefined") {
             const ro = new ResizeObserver(() => {
                 if (!this.tree || this.destroyed) return;
-                if (this.resizeViewport(this.worldH) && this.options.autoFit) this.fit();
+                if (this.resizeViewport(this.worldH) && this.options.autoFit) this.fit({ readable: true });
                 else this.refreshMinimap();
             });
             ro.observe(document.body);
+            // 并排面板拖宽、全屏弹层改尺寸时 body 不会变，得盯住自己的根元素
+            ro.observe(this.rootEl);
             this.disposers.push(() => ro.disconnect());
         }
     }

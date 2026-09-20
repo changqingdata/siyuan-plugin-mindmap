@@ -62,6 +62,35 @@ export async function updateBlock(id: string, markdown: string): Promise<boolean
     }
 }
 
+/* ==================================================================== 折叠 */
+
+/**
+ * 折叠 / 展开大纲里的一个列表项（思源**原生**折叠）。
+ *
+ * 这是「导图 ↔ 大纲 折叠状态双向同步」的写入侧。实测（思源 3.8.4）：
+ * `foldBlock` 会把 `fold="1"` 同时写进三处 ——
+ *
+ *   DOM      `<div class="li" … fold="1">`
+ *   块属性    `{ fold: "1", id: …, updated: … }`
+ *   kramdown  `- {: id="…" fold="1"}内容`
+ *
+ * kramdown 里那一份会随文档存进 `.sy`，**思源自己就把它持久化了**。
+ * 所以不需要我们再往 `custom-*` 里存一份，也就天然满足
+ * 「用户离开时什么状态，下次进来就是什么状态」——
+ * 而且这个状态是大纲与导图共用的同一个，不会各说各话。
+ *
+ * 注意内核**没有批量接口**（`batchFoldBlock` 不存在），折叠全部要逐个调。
+ */
+export async function setOutlineFold(id: string, folded: boolean): Promise<boolean> {
+    try {
+        const res = await fetchSyncPost(folded ? "/api/block/foldBlock" : "/api/block/unfoldBlock", { id });
+        return res?.code === 0;
+    } catch (err) {
+        console.warn("[mindmap] 写入大纲折叠状态失败", id, folded, err);
+        return false;
+    }
+}
+
 /* ==================================================================== 快照 */
 
 /**

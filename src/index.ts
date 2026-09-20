@@ -26,6 +26,7 @@ const SHORTCUT_HELP = [
     "编辑：Tab 子节点 · Shift+Tab 降级 · Enter 同级 · F2 改名 · Delete 删除 · Alt+←/→ 升降级 · Ctrl+↑/↓ 上下移",
     "剪贴：Ctrl+C 复制子树 · Ctrl+V 粘贴为子节点 · Ctrl+X 剪切 · Ctrl+D 快速复制",
     "视图：Ctrl+= / Ctrl+- 缩放 · Ctrl+0 适应画布 · Ctrl+1 回到 100% · Ctrl+F 搜索 · F 全屏 · Esc 退出",
+    "聚焦：Ctrl/⌘ + 双击节点（或右键菜单「聚焦此分支」）只看这一个分支，Esc 逐层返回",
 ].join("\n");
 
 /** 从块菜单点击到的元素反推出所属的列表块 */
@@ -41,10 +42,30 @@ function resolveListBlock(el: HTMLElement | undefined): HTMLElement | null {
     return el.closest<HTMLElement>(".list");
 }
 
+/**
+ * 从内层子列表一路往上找到最外层的那个 `.list`。
+ *
+ * 嵌套子列表（`.list > .li > .list`）在内层也有 `data-node-id`，
+ * 但扫描器明确跳过了嵌套列表（它随父列表一起渲染），命令面板如果拿到内层，
+ * 就会给一个永远不会被渲染的块打上标记。
+ */
+function outermostList(start: HTMLElement | null): HTMLElement | null {
+    let list = start?.closest?.(".list") as HTMLElement | null;
+    if (!list) return null;
+    for (;;) {
+        const up = list.parentElement?.parentElement?.closest?.(".list") as HTMLElement | null;
+        if (!up || up === list) break;
+        list = up;
+    }
+    return list;
+}
+
 export default class MindMapPlugin extends Plugin {
     private config: MMConfig = { ...DEFAULT_CONFIG };
     private scanner!: Scanner;
     private dialog: Dialog | null = null;
+    private sidePanel: HTMLElement | null = null;
+    private sideView: MindMapView | null = null;
 
     /* ================================================================ 生命周期 */
 
@@ -59,6 +80,7 @@ export default class MindMapPlugin extends Plugin {
             onLayoutChange: (listId, layout) => this.persistLayout(listId, layout),
             onFullscreen: (listId, _root, _theme, title) => this.openFullscreen(listId, title),
             openBlock: (id) => this.openBlockTab(id),
+            onSideLost: () => this.closeSide(),
         });
 
         this.registerBlockMenu();
@@ -71,6 +93,7 @@ export default class MindMapPlugin extends Plugin {
 
     onunload() {
         this.scanner?.stop();
+        this.closeSide();
         this.dialog?.destroy();
         this.dialog = null;
     }
@@ -92,6 +115,55 @@ export default class MindMapPlugin extends Plugin {
             hotkey: "",
             callback: () => void this.runMigration(),
         });
+        // 入口之二：命令面板。列表块图标是「我知道有这个功能」之后才好用的入口，
+        // 而命令面板（Ctrl+P）是「我想做这件事」时的入口 —— 而且可以绑快捷键。
+        this.addCommand({
+            langKey: "toggleMindMap",
+            hotkey: "",
+            callback: () => void this.toggleMindMap(),
+        });
+        this.addCommand({
+            langKey: "toggleSidePanel",
+            hotkey: "",
+            callback: () => this.toggleSide(),
+        });
+    }
+
+    /** 光标当前落在哪个元素上（拿不到就退回 activeElement） */
+    private cursorEl(): HTMLElement | null {
+        const node = window.getSelection()?.anchorNode ?? null;
+        const fromSel = node ? (node.nodeType === 1 ? (node as HTMLElement) : node.parentElement) : null;
+        if (fromSel) return fromSel;
+        const active = document.activeElement;
+        return active instanceof HTMLElement ? active : null;
+    }
+
+    /**
+     * 找出这次操作该作用在哪个列表块。
+     *
+     * 优先用光标所在的列表块；光标不在列表里（比如刚打开文档）就回退到
+     * 当前文档的第一个列表块 —— 命令面板的场景下，「什么都不做只弹一句提示」
+     * 比「就近取一个」更让人困惑。
+     */
+    private targetList(): HTMLElement | null {
+        const el = this.cursorEl();
+        const fromCursor = outermostList(el);
+        if (fromCursor?.dataset.nodeId) return fromCursor;
+        const protyle = (el?.closest?.(".protyle") as HTMLElement | null) ?? document.querySelector<HTMLElement>(".protyle");
+        return outermostList(protyle?.querySelector<HTMLElement>(".protyle-wysiwyg .list") ?? null);
+    }
+
+    /** 命令：把当前列表块转为导图 / 切回大纲视图 */
+    private async toggleMindMap() {
+        const list = this.targetList();
+        const id = list?.dataset.nodeId;
+        if (!list || !id) {
+            showMessage("没找到列表块：把光标放进列表里，或先打开一个含列表的文档", 4000);
+            return;
+        }
+        const on = !!list.getAttribute(ATTR_VIEW);
+        await this.applyView(list, on ? null : this.config.layout);
+        showMessage(on ? "已切回大纲视图" : "已转为导图");
     }
 
     /**
@@ -157,6 +229,19 @@ export default class MindMapPlugin extends Plugin {
             });
         }
 
+        items.push({ type: "separator" });
+        items.push({
+            label: "并排查看（大纲 + 导图）",
+            checked: this.scanner.sideListId !== "" && this.scanner.sideListId === list?.dataset.nodeId,
+            disabled,
+            click: () => {
+                if (!list) return;
+                // 点的是同一个块就关掉，否则换到这块
+                if (this.scanner.sideListId === list.dataset.nodeId) this.closeSide();
+                else this.openSide(list);
+            },
+        });
+
         menu.addItem({
             icon: "iconList",
             label: "大纲导图",
@@ -198,6 +283,129 @@ export default class MindMapPlugin extends Plugin {
         });
     }
 
+    /* ================================================================ 并排面板 */
+
+    private toggleSide() {
+        if (this.sidePanel) {
+            this.closeSide();
+            return;
+        }
+        const list = this.targetList();
+        if (!list) {
+            showMessage("没找到列表块：把光标放进列表里，或先打开一个含列表的文档", 4000);
+            return;
+        }
+        this.openSide(list);
+    }
+
+    /**
+     * 并排面板：左边保留大纲原文，右边浮一块导图，实时联动。
+     *
+     * 它顺带解决了「双击跳走」的断裂感 —— 想改文字就直接在左边改，
+     * 右边立刻跟着变，不用再退出导图、改完、手动回来。
+     *
+     * 与全屏弹层的两点不同：
+     *   1. **不隐藏源列表**（视图以 detached 模式挂到面板里）；
+     *   2. **不写 `custom-mindmap` 块属性** —— 它是伴生视图，不该改变这个块的显示模式，
+     *      关掉面板之后这个块该是什么还是什么。
+     */
+    private openSide(list: HTMLElement) {
+        const id = list.dataset.nodeId;
+        if (!id) return;
+
+        if (list.hasAttribute(ATTR_VIEW)) {
+            showMessage("这个列表已经在导图模式了，并排面板是给大纲视图用的", 3500);
+            return;
+        }
+
+        this.closeSide();
+
+        const panel = document.createElement("div");
+        panel.className = "mm-side";
+        panel.setAttribute("contenteditable", "false");
+
+        const grip = document.createElement("div");
+        grip.className = "mm-side-grip";
+        grip.dataset.mmTip = "拖动调整宽度";
+
+        const head = document.createElement("div");
+        head.className = "mm-side-head";
+        const titleEl = document.createElement("span");
+        titleEl.className = "mm-side-title";
+        titleEl.textContent = "大纲导图 · 并排";
+        const closeBtn = document.createElement("button");
+        closeBtn.type = "button";
+        closeBtn.className = "mm-side-close";
+        closeBtn.textContent = "✕";
+        closeBtn.title = "关闭并排面板";
+        closeBtn.onclick = () => this.closeSide();
+        head.append(titleEl, closeBtn);
+
+        const body = document.createElement("div");
+        body.className = "mm-side-body";
+
+        panel.append(grip, head, body);
+        document.body.appendChild(panel);
+
+        const title = document.querySelector<HTMLElement>(".protyle-title")?.textContent?.trim() || "导图";
+        const view = new MindMapView(
+            list,
+            this.config,
+            () => this.scanner.foldOverlay(id),
+            {
+                onFoldChange: (nodeId, folded) => this.scanner.setFold(id, nodeId, folded),
+                onLocate: (nodeId) => {
+                    const el = document.querySelector<HTMLElement>(`.protyle-wysiwyg [data-node-id="${nodeId}"]`);
+                    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+                },
+                onEditInSource: (node) => this.scanner.editInSource(id, node),
+                onOpenBlock: (nodeId) => this.openBlockTab(nodeId),
+                onExit: () => this.closeSide(),
+                onLayoutChange: (layout) => this.persistLayout(id, layout),
+                onFullscreen: () => undefined,
+                onRename: (node, text) => void this.scanner.applyRename(node, text, id),
+                onNodeAction: (kind, node, extra) => void this.scanner.applyAction(kind, node, extra, id),
+                onHistory: (redo) => this.scanner.undo(redo),
+            },
+            title,
+            "side",
+        );
+        view.mount(body);
+        this.scanner.attachSide(id, view);
+
+        this.sidePanel = panel;
+        this.sideView = view;
+
+        /* 左边缘拖拽改宽 */
+        grip.addEventListener("mousedown", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const startX = e.clientX;
+            const startW = panel.getBoundingClientRect().width;
+            const move = (ev: MouseEvent) => {
+                const next = Math.min(Math.max(startW + (startX - ev.clientX), 320), window.innerWidth - 360);
+                panel.style.width = `${next}px`;
+            };
+            const up = () => {
+                window.removeEventListener("mousemove", move);
+                window.removeEventListener("mouseup", up);
+            };
+            window.addEventListener("mousemove", move);
+            window.addEventListener("mouseup", up);
+        });
+    }
+
+    private closeSide() {
+        const view = this.sideView;
+        if (view) {
+            this.scanner.detachSide(view);
+            view.destroy();
+        }
+        this.sideView = null;
+        this.sidePanel?.remove();
+        this.sidePanel = null;
+    }
+
     /* ================================================================ 全屏查看 */
 
     private openFullscreen(listId: string, title: string) {
@@ -226,7 +434,7 @@ export default class MindMapPlugin extends Plugin {
         view = new MindMapView(
             listEl,
             this.config,
-            this.scanner.getFoldSet(listId),
+            () => this.scanner.foldOverlay(listId),
             {
                 onFoldChange: (nodeId, folded) => this.scanner.setFold(listId, nodeId, folded),
                 onLocate: () => undefined,
@@ -304,6 +512,20 @@ export default class MindMapPlugin extends Plugin {
             });
         };
 
+        /** 纯说明条目（没有可操作的控件）—— 用于交代「这个行为已经由内核保证，不需要你选」 */
+        const addHint = (title: string, description: string) => {
+            setting.addItem({
+                title,
+                description,
+                createActionElement: () => {
+                    const box = document.createElement("span");
+                    box.className = "b3-label__text fn__size200";
+                    box.textContent = "已同步";
+                    return box;
+                },
+            });
+        };
+
         const addNumber = (
             title: string,
             description: string,
@@ -374,13 +596,23 @@ export default class MindMapPlugin extends Plugin {
             this.config.wheelPan = v;
         });
 
-        addToggle("记忆折叠状态", "把折叠状态写入块属性 custom-mindmap-fold，可跨设备同步", this.config.persistFold, (v) => {
-            this.config.persistFold = v;
-        });
+        addHint(
+            "折叠状态与大纲同步",
+            "导图的折叠状态就是思源原生的列表折叠：在大纲里折一个节点，导图立刻跟着折；在导图上折一个节点，大纲也会跟着折。它随文档一起保存，所以离开时什么状态、下次进来就是什么状态。",
+        );
 
         addToggle("自动适应画布", "渲染完成后自动缩放到刚好铺满可视区", this.config.autoFit, (v) => {
             this.config.autoFit = v;
         });
+
+        addToggle(
+            "逻辑图自动分列",
+            "逻辑结构图的层级是纵向排列的，节点一多画布会变成细长条、横向空间全部闲置。开启后单列过高时自动把一级分支摊成多列。",
+            this.config.columnLayout,
+            (v) => {
+                this.config.columnLayout = v;
+            },
+        );
 
         addToggle("双击编辑节点", "双击节点直接改名，回车提交、Esc 取消，改动会写回思源", this.config.editable, (v) => {
             this.config.editable = v;

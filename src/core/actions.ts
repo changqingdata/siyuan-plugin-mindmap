@@ -68,19 +68,25 @@ function childAnchor(node: MMNode): Omit<InsertBlockOptions, "data"> | null {
     return null;
 }
 
-/** 插入子节点（追加到末尾） */
-export async function insertChildNode(node: MMNode): Promise<boolean> {
+/**
+ * 插入子节点（追加到末尾）。
+ *
+ * 返回新块的 ID（**取不到 ID 时返回空串**，空串仍然代表成功），失败返回 null。
+ * 调用方判断成败请一律用 `!== null` —— 返回类型从 boolean 改成 string 之后，
+ * 如果沿用真假值判断，「插进去了但没拿到 ID」会被误判成失败并弹「操作未生效」。
+ */
+export async function insertChildNode(node: MMNode): Promise<string | null> {
     const place = childAnchor(node);
-    if (!place) return false;
-    return (await insertBlock({ data: newItemMarkdown(node), ...place })) !== null;
+    if (!place) return null;
+    return insertBlock({ data: newItemMarkdown(node), ...place });
 }
 
-/** 插入同级节点 */
-export async function insertSiblingNode(node: MMNode, where: "before" | "after"): Promise<boolean> {
-    if (!node.id) return false;
+/** 插入同级节点。返回新块 ID，语义同 insertChildNode */
+export async function insertSiblingNode(node: MMNode, where: "before" | "after"): Promise<string | null> {
+    if (!node.id) return null;
     const data = newItemMarkdown(node);
     const opts: InsertBlockOptions = where === "after" ? { data, previousID: node.id } : { data, nextID: node.id };
-    return (await insertBlock(opts)) !== null;
+    return insertBlock(opts);
 }
 
 /** 删除节点（连同其子树） */
@@ -158,11 +164,13 @@ export async function moveNodeTo(node: MMNode, target: MMNode, position: MMDropP
     return relocateByCopy(node, { nextID: target.id });
 }
 
-/** 快速复制：在节点之后插入一份含子树的副本（副本会拿到新的块 ID） */
-export async function duplicateNode(node: MMNode): Promise<boolean> {
-    if (!node.id) return false;
-    const id = await insertBlock({ data: serializeSubtree(node), previousID: node.id });
-    return id !== null;
+/**
+ * 快速复制：在节点之后插入一份含子树的副本（副本会拿到新的块 ID）。
+ * 返回新块 ID，语义同 insertChildNode。
+ */
+export async function duplicateNode(node: MMNode): Promise<string | null> {
+    if (!node.id) return null;
+    return insertBlock({ data: serializeSubtree(node), previousID: node.id });
 }
 
 /** 粘贴：把一段 markdown 追加为目标节点的子节点 */

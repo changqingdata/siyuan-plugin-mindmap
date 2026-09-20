@@ -75,7 +75,12 @@ export interface MMNode {
     text: string;
     kind: MMNodeKind;
     checked?: boolean;
-    /** 折叠态（由插件自己维护并持久化到块属性） */
+    /**
+     * 折叠态。
+     *
+     * 直接来自思源原生的列表折叠（`.li[fold="1"]`）—— 没有插件私有副本，
+     * 所以「大纲什么状态、导图就是什么状态」是结构上成立的，不需要两边对表。
+     */
     folded: boolean;
     /** 所属列表是否为有序列表 —— 决定是否显示层级编号 */
     numbered: boolean;
@@ -171,8 +176,6 @@ export interface MMConfig extends MMRenderOptions {
     ctrlWheelZoom: boolean;
     /** 滚轮直接平移导图（否则交给页面滚动） */
     wheelPan: boolean;
-    /** 折叠状态写入块属性 */
-    persistFold: boolean;
     /** 自动适应画布 */
     autoFit: boolean;
     /** 允许在导图内双击改名并回写内核 */
@@ -194,6 +197,14 @@ export interface MMConfig extends MMRenderOptions {
     compactThreshold: number;
     /** 节点数超过该值时默认不渲染，需手动确认 */
     hardLimit: number;
+    /**
+     * 逻辑结构图自动分列。
+     *
+     * 逻辑图的交叉轴是纵向的，节点一多画布就会变成 700×3400 这种细长条，
+     * 横向空间全部闲置。开启后，当单列高度超过可视区的一定倍数时，
+     * 把一级分支摊成若干列，画布比例回到接近视口的形状。
+     */
+    columnLayout: boolean;
 }
 
 export const DEFAULT_CONFIG: MMConfig = {
@@ -205,7 +216,6 @@ export const DEFAULT_CONFIG: MMConfig = {
     branchColor: true,
     ctrlWheelZoom: true,
     wheelPan: false,
-    persistFold: true,
     autoFit: true,
     editable: true,
     draggable: true,
@@ -215,14 +225,21 @@ export const DEFAULT_CONFIG: MMConfig = {
     minimap: true,
     compactThreshold: 400,
     hardLimit: 2000,
+    columnLayout: true,
 };
 
 /** 块属性名 */
 export const ATTR_VIEW = "custom-mindmap";
-/** 折叠状态属性名，值为被折叠节点的块 ID 列表（逗号分隔） */
-export const ATTR_FOLD = "custom-mindmap-fold";
 /** 【自定义块样式】插件的列表导图标记，用于迁移 */
 export const ATTR_LEGACY_VIEW = "custom-block-list-view";
+/**
+ * 旧版用来存折叠状态的块属性，**已废弃**。
+ *
+ * 现在折叠态直接用思源原生的 `fold`（随文档存进 `.sy`，也随文档同步）。
+ * 保留这个常量只为一件事：挂载时把老用户的折叠选择一次性迁移过去，
+ * 迁完就把属性删掉。不读它、也不再写它。
+ */
+export const ATTR_LEGACY_FOLD = "custom-mindmap-fold";
 
 /** 在列表块元素上的挂载标记 */
 export const MOUNT_FLAG = "data-mm-mounted";

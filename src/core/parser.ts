@@ -95,7 +95,15 @@ export function parseList(listEl: HTMLElement, path = ""): MMNode[] {
             text,
             kind,
             checked: li.classList.contains("protyle-task--done") ? true : undefined,
-            folded: false,
+            /**
+             * 折叠状态**直接读大纲自己**（`.li[fold="1"]`）。
+             *
+             * 这是「导图 ↔ 大纲 双向同步」的读取侧：思源把列表项的折叠态存在
+             * `fold` 属性上（并随文档持久化），所以只要读它，导图就天然
+             * 「大纲什么状态、导图就是什么状态」，跨会话也一致 ——
+             * 不再需要插件自己维护一份 `custom-mindmap-fold`。
+             */
+            folded: li.getAttribute("fold") === "1",
             numbered,
             order,
             children,
@@ -194,6 +202,19 @@ function sanitizeByRegex(html: string): string {
         .trim();
 }
 
+/**
+ * 行内容器里不该出现的**块级外壳**。
+ *
+ * 实测：刚用块 API 插进来的列表项，它的段落里裹着一层 `<div>`（Protyle 还没把
+ * 事务里的原始结构规范化）。这层 `<div>` 留在 `html` 里会让节点被判定成
+ * 「含行内格式」，于是双击改名被路由去「回源编辑」—— 而 `revealAndEdit`
+ * （插入即编辑）走的正是这条路，结果是**刚插完节点导图就整个退出了**。
+ *
+ * 而且它本来也没有保留价值：`.mm-txt` 是单行行内容器，块级标签在这里只有破坏性。
+ * 所以统一「脱壳」—— 保留子节点，去掉标签本身。
+ */
+const UNWRAP_TAGS = ["div", "p", "section", "article", "blockquote", "figure", "ul", "ol", "li"];
+
 /** DOM 层：按元素删掉编辑器 UI 外壳，并把图片的懒加载地址搬到 src */
 function sanitizeByDom(html: string): string {
     const tpl = document.createElement("template");
@@ -202,6 +223,21 @@ function sanitizeByDom(html: string): string {
     if (!frag) return html;
 
     frag.querySelectorAll(DROP_SELECTOR).forEach((el) => el.remove());
+
+    // 块级外壳脱壳。可能嵌套，所以反复跑几轮直到没有可脱的。
+    for (let round = 0; round < 4; round++) {
+        let hit = false;
+        for (const tag of UNWRAP_TAGS) {
+            frag.querySelectorAll(tag).forEach((el) => {
+                const parent = el.parentNode;
+                if (!parent) return;
+                while (el.firstChild) parent.insertBefore(el.firstChild, el);
+                parent.removeChild(el);
+                hit = true;
+            });
+        }
+        if (!hit) break;
+    }
 
     /*
      * 图片：Protyle 用 data-src + loading="lazy" 做懒加载。

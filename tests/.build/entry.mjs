@@ -35,7 +35,15 @@ function parseList(listEl, path = "") {
       text,
       kind,
       checked: li2.classList.contains("protyle-task--done") ? true : void 0,
-      folded: false,
+      /**
+       * 折叠状态**直接读大纲自己**（`.li[fold="1"]`）。
+       *
+       * 这是「导图 ↔ 大纲 双向同步」的读取侧：思源把列表项的折叠态存在
+       * `fold` 属性上（并随文档持久化），所以只要读它，导图就天然
+       * 「大纲什么状态、导图就是什么状态」，跨会话也一致 ——
+       * 不再需要插件自己维护一份 `custom-mindmap-fold`。
+       */
+      folded: li2.getAttribute("fold") === "1",
       numbered,
       order,
       children,
@@ -87,12 +95,26 @@ function sanitizeInline(html) {
 function sanitizeByRegex(html) {
   return html.replace(ZERO_WIDTH, "").replace(/\scontenteditable="(?!false)[^"]*"/g, "").replace(/\sspellcheck="[^"]*"/g, "").replace(/\sdata-render="[^"]*"/g, "").replace(/\sclass="protyle-wysiwyg--select"/g, "").trim();
 }
+var UNWRAP_TAGS = ["div", "p", "section", "article", "blockquote", "figure", "ul", "ol", "li"];
 function sanitizeByDom(html) {
   const tpl = document.createElement("template");
   tpl.innerHTML = html;
   const frag = tpl.content;
   if (!frag) return html;
   frag.querySelectorAll(DROP_SELECTOR).forEach((el2) => el2.remove());
+  for (let round = 0; round < 4; round++) {
+    let hit = false;
+    for (const tag of UNWRAP_TAGS) {
+      frag.querySelectorAll(tag).forEach((el2) => {
+        const parent = el2.parentNode;
+        if (!parent) return;
+        while (el2.firstChild) parent.insertBefore(el2.firstChild, el2);
+        parent.removeChild(el2);
+        hit = true;
+      });
+    }
+    if (!hit) break;
+  }
   frag.querySelectorAll("img").forEach((img) => {
     const real = img.getAttribute("data-src") || img.getAttribute("src") || "";
     if (real) img.setAttribute("src", real);
@@ -186,6 +208,7 @@ function flatten(root2) {
 // src/core/layout.ts
 function layout(root2, opt) {
   const { mode, gapX, gapY, padX, padY } = opt;
+  const maxCross = opt.maxCross ?? 0;
   const isTree = mode === "tree";
   const crossSelf = (n) => isTree ? n.w : n.h;
   const depthSelf = (n) => isTree ? n.h : n.w;
@@ -231,6 +254,71 @@ function layout(root2, opt) {
     n.d1 = d + depthSelf(n);
     for (const k of n.kids) placeDepth(k, n.d1 + gapX);
   }
+  function layoutColumns(r2, colGapX, colGapY, limit) {
+    const kids = r2.kids;
+    const total = r2.cross;
+    const want = Math.max(2, Math.ceil(total / limit));
+    const cap = total / want;
+    const groups = [];
+    let cur = [];
+    let curH = 0;
+    for (const k of kids) {
+      const add = cur.length === 0 ? k.cross : k.cross + colGapY;
+      if (cur.length > 0 && curH + add > cap && groups.length < want - 1) {
+        groups.push(cur);
+        cur = [k];
+        curH = k.cross;
+      } else {
+        cur.push(k);
+        curH += add;
+      }
+    }
+    if (cur.length > 0) groups.push(cur);
+    const colH = [];
+    const colW = [];
+    for (const g2 of groups) {
+      let h = 0;
+      g2.forEach((k, i) => {
+        h += k.cross + (i > 0 ? colGapY : 0);
+      });
+      colH.push(h);
+      let y = 0;
+      for (const k of g2) {
+        placeCross(k, y);
+        y += k.cross + colGapY;
+      }
+      for (const k of g2) placeDepth(k, 0);
+      let w = 0;
+      const depthEnd = (n) => {
+        w = Math.max(w, n.d1);
+        n.kids.forEach(depthEnd);
+      };
+      g2.forEach(depthEnd);
+      colW.push(w);
+    }
+    const maxH = Math.max(...colH);
+    const colX = [];
+    let x = r2.w + colGapX;
+    for (let i = 0; i < groups.length; i++) {
+      colX.push(x);
+      x += colW[i] + colGapX * 2;
+    }
+    groups.forEach((g2, i) => {
+      const yOff = (maxH - colH[i]) / 2;
+      const place = (n) => {
+        n.x = n.d0 + colX[i];
+        n.y = n.cy - n.h / 2 + yOff;
+        n.dir = 1;
+        n.kids.forEach(place);
+      };
+      g2.forEach(place);
+    });
+    r2.kids = r2.children;
+    r2.dir = 1;
+    r2.x = 0;
+    r2.y = maxH / 2 - r2.h / 2;
+    r2.cy = r2.y + r2.h / 2;
+  }
   if (mode === "mind") {
     const all = root2.folded ? [] : root2.children;
     const mid = Math.ceil(all.length / 2);
@@ -275,20 +363,24 @@ function layout(root2, opt) {
     root2.y = -root2.h / 2;
   } else {
     measure(root2);
-    placeCross(root2, 0);
-    placeDepth(root2, 0);
-    const toXY = (n) => {
-      if (isTree) {
-        n.x = n.cy - n.w / 2;
-        n.y = n.d0;
-      } else {
-        n.y = n.cy - n.h / 2;
-        n.x = n.d0;
-      }
-      n.dir = 1;
-      n.kids.forEach(toXY);
-    };
-    toXY(root2);
+    if (mode === "logic" && maxCross > 0 && root2.children.length > 1 && root2.cross > maxCross) {
+      layoutColumns(root2, gapX, gapY, maxCross);
+    } else {
+      placeCross(root2, 0);
+      placeDepth(root2, 0);
+      const toXY = (n) => {
+        if (isTree) {
+          n.x = n.cy - n.w / 2;
+          n.y = n.d0;
+        } else {
+          n.y = n.cy - n.h / 2;
+          n.x = n.d0;
+        }
+        n.dir = 1;
+        n.kids.forEach(toXY);
+      };
+      toXY(root2);
+    }
   }
   let minX = Infinity;
   let minY = Infinity;

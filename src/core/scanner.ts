@@ -1,9 +1,17 @@
 import { showMessage } from "siyuan";
-import { ATTR_FOLD, ATTR_VIEW, LAZY_FLAG, MOUNT_FLAG } from "../types";
+import { ATTR_LEGACY_FOLD, ATTR_VIEW, LAZY_FLAG, MOUNT_FLAG } from "../types";
 import type { MMActionExtra, MMActionKind, MMConfig, MMLayout, MMNode, MMTheme } from "../types";
 import { MindMapView } from "./renderer";
 import { History } from "./history";
-import { getBlockAttrs, getBlockKramdown, getDocTitle, restoreBlock, scrollToBlock, setBlockAttrs } from "../utils/api";
+import {
+    getBlockAttrs,
+    getBlockKramdown,
+    getDocTitle,
+    restoreBlock,
+    scrollToBlock,
+    setBlockAttrs,
+    setOutlineFold,
+} from "../utils/api";
 import {
     deleteNode,
     duplicateNode,
@@ -26,9 +34,24 @@ export interface ScannerHooks {
     onFullscreen: (listId: string, root: MMNode, theme: MMTheme, title: string) => void;
     /** 打开一个块（双链的目标）—— 由插件层用 openTab 实现 */
     openBlock: (id: string) => void;
+    /** 并排面板的源块没了（被删掉 / 换了文档）—— 插件层据此关掉面板 */
+    onSideLost?: () => void;
 }
 
 const SELECTOR = `.list[${ATTR_VIEW}]`;
+
+/**
+ * 「辅助视图」槽位：全屏弹层与并排面板共用。
+ *
+ * `sig` 是它自己那份内容签名 —— 不能和行内视图共用 signatures，
+ * 它们盯着的是同一个源列表，行内视图先比对并写回签名后，
+ * 辅助视图再比就永远等于「没变」。
+ */
+interface AuxView {
+    listId: string;
+    view: MindMapView;
+    sig: string;
+}
 
 /** 撤销记录里显示的操作名 */
 const ACTION_LABEL: Record<string, string> = {
@@ -50,11 +73,30 @@ const OBSERVE_OPTS: MutationObserverInit = {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: [ATTR_VIEW],
+    // 除了自己的挂载标记，还要盯 `fold` —— 用户在大纲里折叠一个列表项时，
+    // 文字一个都没变，只有 `.li` 上的 fold 属性变了。不监听它，
+    // 导图就永远跟不上大纲的折叠（双向同步的大纲 → 导图 这一半）。
+    attributeFilter: [ATTR_VIEW, "fold"],
 };
 
 /** 懒渲染提前量：元素进入视口外 320px 就开始渲染 */
 const LAZY_MARGIN = "320px 0px";
+
+/** 覆盖表为空时的共享常量，省得每次 render 都新建一个 Map */
+const NO_OVERLAY: ReadonlyMap<string, boolean> = new Map();
+
+/**
+ * 折叠写入内核之后，隔多久去核对一次 DOM。
+ *
+ * 折叠走的是 HTTP → 内核事务 → 前端重绘这条链，是**异步**的：
+ * 调完 `foldBlock` 的当下，`.li[fold]` 还没变。这段时间里任何一次重渲染
+ * （编辑器打字、别的窗口改了文档）都会按旧 DOM 解析出旧折叠态 ——
+ * 用户看到的是一折就又弹回去。覆盖表就是用来盖住这段空窗期的。
+ */
+const FOLD_SETTLE_MS = 700;
+
+/** 覆盖表最多重试几次写回，之后放弃（避免网络不通时无限重试） */
+const FOLD_MAX_TRIES = 3;
 
 /**
  * 变更侦测与视图挂载。
@@ -64,7 +106,21 @@ const LAZY_MARGIN = "320px 0px";
  */
 export class Scanner {
     private views = new Map<string, MindMapView>();
-    private foldSets = new Map<string, Set<string>>();
+    /**
+     * 折叠覆盖表：`listId → (blockId → 期望的折叠态)`。
+     *
+     * 折叠状态**没有**插件私有副本 —— 真相源是思源原生的 `fold` 属性
+     * （解析侧直接读 `.li[fold="1"]`，写入侧调 `/api/block/foldBlock`，
+     * 思源自己会把 kramdown 里那份存进 `.sy`）。这张表只是补一个时序空窗：
+     * 用户在导图上折一个节点之后、内核把 DOM 更新完之前，任何一次重渲染都会
+     * 按旧 DOM 解析出旧状态，视觉上「折了又弹回来」。表里的条目在内核追上之后
+     * 由 {@link reconcileFold} 自动清掉，所以它不会长成一个影子真相源。
+     */
+    private pendingFold = new Map<string, Map<string, boolean>>();
+    /** 每个列表的折叠核对定时器（只存 id，重试次数随递归传参） */
+    private foldTimers = new Map<string, number>();
+    /** 已经做过旧属性迁移的列表（一个列表只迁一次） */
+    private migrated = new Set<string>();
     /** 已主动卸载的块，短时间内抑制重新挂载 */
     private suppressed = new Map<string, number>();
     /** 源列表的文本签名，用于判断内容是否真的变了 */
@@ -77,6 +133,16 @@ export class Scanner {
     private forced = new Set<string>();
     /** 「节点过多」提示元素 */
     private notices = new Map<string, HTMLElement>();
+    /**
+     * 等着「插入即编辑」的新块 ID。
+     *
+     * 结构操作 → 内核写回 → Protyle 重建 DOM → 我们的扫描重挂视图，这一串是异步的，
+     * 而新节点的块 ID 在插入那一刻就拿到了。先记在这里，等视图重建完再去选中它并进入编辑态。
+     */
+    private pendingEdit = new Map<string, string>();
+    /** 「回到导图」浮动条 */
+    private backBar: HTMLElement | null = null;
+    private backBarTimer = 0;
     /**
      * 撤销 / 重做栈。
      *
@@ -101,20 +167,20 @@ export class Scanner {
      * 记 listId 而不是直接记元素：结构操作之后 Protyle 会把 `.list` 重建，
      * 每次扫描都得重新找一遍当前那个（详见 scan 里对它的处理）。
      */
-    private fullscreen: { listId: string; view: MindMapView } | null = null;
+    private fullscreen: AuxView | null = null;
     /**
-     * 全屏视图自己的签名槽位。
+     * 并排面板里的那份视图。
      *
-     * 不能和行内视图共用 signatures —— 它们盯着的是同一个源列表，
-     * 行内视图先比对并写回签名后，全屏这边再比就永远等于「没变」。
+     * 与全屏的区别：**不隐藏源列表**，左边大纲右边导图同时可见，靠 MutationObserver
+     * 实时联动（编辑器里改一个字，右边立刻跟着变）。所以它既不写块属性、
+     * 也不走 `mm-source-hidden`，纯粹是一个「伴生面板」。
      */
-    private fsSignature = "";
+    private side: AuxView | null = null;
 
     private observer: MutationObserver | null = null;
     private io: IntersectionObserver | null = null;
     private pending = new Set<HTMLElement>();
     private timer: number | null = null;
-    private persistTimers = new Map<string, number>();
     private paused = 0;
 
     constructor(private hooks: ScannerHooks) {}
@@ -144,20 +210,22 @@ export class Scanner {
         if (this.timer !== null) window.clearTimeout(this.timer);
         this.timer = null;
         this.pending.clear();
-        for (const t of this.persistTimers.values()) window.clearTimeout(t);
-        this.persistTimers.clear();
+        for (const t of this.foldTimers.values()) window.clearTimeout(t);
+        this.foldTimers.clear();
         for (const view of this.views.values()) view.destroy();
         this.views.clear();
-        this.foldSets.clear();
-        this.suppressed.clear();
-        this.signatures.clear();
+        this.pendingFold.clear();
+        this.migrated.clear();
+        this.suppressed.clear();        this.signatures.clear();
         this.mounting.clear();
         this.visible.clear();
         this.forced.clear();
         for (const box of this.notices.values()) box.remove();
         this.notices.clear();
         this.fullscreen = null;
-        this.fsSignature = "";
+        this.side = null;
+        this.pendingEdit.clear();
+        this.hideBackBar();
         this.history.clear();
     }
 
@@ -166,19 +234,29 @@ export class Scanner {
         const opts = this.hooks.getOptions();
         for (const view of this.views.values()) view.setOptions(opts);
         this.fullscreen?.view.setOptions(opts);
+        this.side?.view.setOptions(opts);
     }
 
     /** 登记全屏弹层里的视图，让它和行内视图一样跟着源列表刷新 */
     attachFullscreen(listId: string, view: MindMapView) {
-        this.fullscreen = { listId, view };
-        this.fsSignature = this.signature(view.source);
+        this.fullscreen = { listId, view, sig: this.signature(view.source) };
     }
 
     detachFullscreen(view: MindMapView) {
-        if (this.fullscreen?.view === view) {
-            this.fullscreen = null;
-            this.fsSignature = "";
-        }
+        if (this.fullscreen?.view === view) this.fullscreen = null;
+    }
+
+    /** 登记并排面板里的视图 */
+    attachSide(listId: string, view: MindMapView) {
+        this.side = { listId, view, sig: this.signature(view.source) };
+    }
+
+    detachSide(view: MindMapView) {
+        if (this.side?.view === view) this.side = null;
+    }
+
+    get sideListId(): string {
+        return this.side?.listId ?? "";
     }
 
     /**
@@ -195,7 +273,9 @@ export class Scanner {
             this.pauseObserver(() => view.destroy());
             this.views.delete(listId);
         }
-        this.foldSets.delete(listId);
+        // 覆盖表**不在这里清**：unmount 常发生在「源元素被 Protyle 重建」的场合，
+        // 紧接着就会重挂，清掉就把用户刚折的那一下丢了。交给 reconcileFold 收尾
+        // （它核对完发现列表真的没了，会自行丢弃）。
         this.signatures.delete(listId);
         if (suppress) this.suppressed.set(listId, Date.now());
     }
@@ -263,6 +343,7 @@ export class Scanner {
             if (sig !== this.signatures.get(id)) {
                 this.signatures.set(id, sig);
                 view.render();
+                this.applyPendingEdit(id);
             }
         }
 
@@ -284,25 +365,11 @@ export class Scanner {
             });
         }
 
-        /* 2b. 全屏弹层里的视图不在 .protyle-wysiwyg 里，得单独照看 */
-        const fs = this.fullscreen;
-        if (fs) {
-            // 每次都重新查当前的源列表元素。结构操作（尤其 moveBlock）之后
-            // Protyle 会把整个 `.list` 重建，视图握着的旧引用会变成游离节点 ——
-            // 那样 signature 永远读到旧内容，于是永远判成「没变」、永远不重渲染。
-            // 实测就是这个原因导致「全屏里 Shift+Tab 之后画面一动不动」。
-            const src = document.querySelector<HTMLElement>(`.list[data-node-id="${fs.listId}"]`);
-            if (!src || !fs.view.element.isConnected) {
-                this.fullscreen = null;
-                this.fsSignature = "";
-            } else {
-                fs.view.setSource(src);
-                const sig = this.signature(src);
-                if (sig !== this.fsSignature) {
-                    this.fsSignature = sig;
-                    fs.view.render();
-                }
-            }
+        /* 2b. 全屏弹层 / 并排面板里的视图不在 .protyle-wysiwyg 里，得单独照看 */
+        if (this.fullscreen && !this.syncAux(this.fullscreen)) this.fullscreen = null;
+        if (this.side && !this.syncAux(this.side)) {
+            this.side = null;
+            this.hooks.onSideLost?.();
         }
 
         /* 3. 清理已消失的「节点过多」提示 */
@@ -314,17 +381,45 @@ export class Scanner {
         }
     }
 
+    /**
+     * 照看一个「不在 .protyle-wysiwyg 里」的辅助视图（全屏弹层 / 并排面板）。
+     *
+     * 每次都重新查当前的源列表元素。结构操作（尤其 moveBlock）之后 Protyle 会把
+     * 整个 `.list` 重建，视图握着的旧引用会变成游离节点 —— 那样 signature 永远读到
+     * 旧内容，于是永远判成「没变」、永远不重渲染。
+     * 实测就是这个原因导致「全屏里 Shift+Tab 之后画面一动不动」。
+     *
+     * @returns 视图是否还活着（false 表示该丢掉这个槽位）
+     */
+    private syncAux(slot: AuxView): boolean {
+        const src = document.querySelector<HTMLElement>(`.list[data-node-id="${slot.listId}"]`);
+        if (!src || !slot.view.element.isConnected) return false;
+        slot.view.setSource(src);
+        const sig = this.signature(src);
+        if (sig !== slot.sig) {
+            slot.sig = sig;
+            slot.view.render();
+            this.applyPendingEdit(slot.listId);
+        }
+        return true;
+    }
+
     private prune() {
         for (const [id, view] of Array.from(this.views)) {
             if (!view.element.isConnected) {
                 this.views.delete(id);
-                this.foldSets.delete(id);
                 this.signatures.delete(id);
             }
         }
     }
 
-    /** 源列表的纯文本签名，忽略导图自身 DOM */
+    /**
+     * 源列表的内容签名，忽略导图自身 DOM。
+     *
+     * ⚠️ 必须把**折叠态**也算进去：用户在大纲里折一个节点，文字一个都没变，
+     * 只靠文本的话扫描会判成「没变化」→ 导图永远不跟着折。
+     * 折叠是导图与大纲共用的状态，它变了就是内容变了。
+     */
     private signature(el: HTMLElement): string {
         let s = "";
         const walk = (node: Node) => {
@@ -336,6 +431,10 @@ export class Scanner {
             node.childNodes.forEach(walk);
         };
         walk(el);
+        // 文档顺序稳定，所以拼出来的串是确定的
+        el.querySelectorAll('.li[fold="1"]').forEach((li) => {
+            s += `\u0001${li.getAttribute("data-node-id") ?? ""}`;
+        });
         return s;
     }
 
@@ -373,14 +472,10 @@ export class Scanner {
                 return;
             }
 
-            // 折叠状态先读块属性，再创建视图
-            const foldSet = new Set<string>();
-            if (opts.persistFold) {
-                const attrs = await getBlockAttrs(id);
-                const raw = attrs[ATTR_FOLD];
-                if (raw) raw.split(",").forEach((v) => v && foldSet.add(v));
-            }
-            this.foldSets.set(id, foldSet);
+            // 折叠状态不在这里读了 —— 它就在 DOM 上（`.li[fold="1"]`），
+            // parseList 每次都直接读，视图重建天然拿到最新状态，跨会话也一致。
+            // 覆盖表只负责补「刚点完、内核还没回推」的那段空窗。
+            void this.migrateLegacyFold(id);
 
             // 异步等待期间块可能已经被替换
             if (!list.isConnected || this.views.has(id)) return;
@@ -389,9 +484,9 @@ export class Scanner {
             const view = new MindMapView(
                 list,
                 opts,
-                foldSet,
+                () => this.foldOverlay(id),
                 {
-                    onFoldChange: (nodeId, folded) => this.updateFold(id, nodeId, folded),
+                    onFoldChange: (nodeId, folded) => this.setFold(id, nodeId, folded),
                     onLocate: (nodeId) => this.locate(id, nodeId),
                     onEditInSource: (node) => this.editInSource(id, node),
                     onOpenBlock: (nodeId) => this.hooks.openBlock(nodeId),
@@ -403,6 +498,7 @@ export class Scanner {
                     onHistory: (redo) => this.undo(redo),
                 },
                 title,
+                "inline",
             );
 
             this.pauseObserver(() => {
@@ -412,6 +508,7 @@ export class Scanner {
             this.views.set(id, view);
             this.signatures.set(id, this.signature(list));
             this.clearNotice(id);
+            this.applyPendingEdit(id);
         } finally {
             this.mounting.delete(id);
         }
@@ -499,16 +596,27 @@ export class Scanner {
         this.lastUserActionAt = Date.now();
         const before = await this.snapshot(listId);
         let ok = false;
+        /** 新建出来的块 ID —— 用来「插入即编辑」，让用户直接打字就是命名 */
+        let newId = "";
         switch (kind) {
-            case "insertChild":
-                ok = await insertChildNode(node);
+            case "insertChild": {
+                const id = await insertChildNode(node);
+                ok = id !== null;
+                newId = id ?? "";
                 break;
-            case "insertSiblingBefore":
-                ok = await insertSiblingNode(node, "before");
+            }
+            case "insertSiblingBefore": {
+                const id = await insertSiblingNode(node, "before");
+                ok = id !== null;
+                newId = id ?? "";
                 break;
-            case "insertSiblingAfter":
-                ok = await insertSiblingNode(node, "after");
+            }
+            case "insertSiblingAfter": {
+                const id = await insertSiblingNode(node, "after");
+                ok = id !== null;
+                newId = id ?? "";
                 break;
+            }
             case "delete":
                 ok = await deleteNode(node);
                 break;
@@ -527,9 +635,12 @@ export class Scanner {
             case "move":
                 if (extra?.target && extra.position) ok = await moveNodeTo(node, extra.target, extra.position);
                 break;
-            case "duplicate":
-                ok = await duplicateNode(node);
+            case "duplicate": {
+                const id = await duplicateNode(node);
+                ok = id !== null;
+                newId = id ?? "";
                 break;
+            }
             case "paste":
                 if (extra?.data) ok = await pasteNode(node, extra.data);
                 break;
@@ -542,10 +653,37 @@ export class Scanner {
             return;
         }
         this.record(listId, ACTION_LABEL[kind] ?? "操作", before, await this.snapshot(listId));
+
+        // 插入即编辑：新节点建出来之后自动选中并进入编辑态。
+        // 内核写回 → Protyle 重建 DOM → 我们重挂视图，这一串是异步的，
+        // 所以先记下 ID，等视图重建完再兑现（见 applyPendingEdit）。
+        if (newId && listId) {
+            this.pendingEdit.set(listId, newId);
+            // 兜底：万一视图一直没重建（比如扫描被别的动作打断），
+            // 别让这条记录留到几分钟后突然跳进编辑态
+            window.setTimeout(() => {
+                if (this.pendingEdit.get(listId) === newId) this.pendingEdit.delete(listId);
+            }, 4000);
+        }
+
         this.rescanSoon();
         // 结构操作必然重建 `.list`，焦点一定会掉；接回来用户才能接着用键盘
         // （尤其「删除 → Ctrl+Z」这条链路，第二步靠的就是焦点还在导图上）
         this.focusSoon(listId);
+    }
+
+    /**
+     * 兑现「插入即编辑」：等视图重挂完之后，选中新节点并进入编辑态。
+     *
+     * 取不到就留着记录等下一次扫描 —— 视图可能比内核晚一拍。
+     */
+    private applyPendingEdit(listId: string) {
+        const id = this.pendingEdit.get(listId);
+        if (!id) return;
+        const view = this.fullscreen?.listId === listId ? this.fullscreen.view : this.views.get(listId);
+        if (!view) return;
+        if (!view.revealAndEdit(id)) return;
+        this.pendingEdit.delete(listId);
     }
 
     /* ================================================================ 撤销 / 重做 */
@@ -630,6 +768,7 @@ export class Scanner {
     /* ================================================================ 其他动作 */
 
     private exitView(listId: string) {
+        this.hideBackBar();
         this.unmount(listId);
         void setBlockAttrs(listId, { [ATTR_VIEW]: null });
     }
@@ -654,6 +793,9 @@ export class Scanner {
     editInSource(listId: string, node: MMNode) {
         const contentId = node.contentId;
         if (!contentId) return;
+        // 退出视图会把 ATTR_VIEW 从 DOM 上摘掉，所以先记下当前布局，
+        // 「回到导图」按钮要靠它把视图原样恢复
+        const layout = this.currentLayout(listId);
         this.exitView(listId);
 
         window.setTimeout(() => {
@@ -684,41 +826,220 @@ export class Scanner {
 
             block.classList.add("mm-flash");
             window.setTimeout(() => block.classList.remove("mm-flash"), 1400);
-            showMessage("已回到原文编辑（格式不会丢）；改完点列表块的图标可再次进入导图", 5000);
+            this.showBackBar(listId, layout);
         }, 120);
     }
 
-    /** 取某个列表块的折叠状态集合（全屏视图复用） */
-    getFoldSet(listId: string): Set<string> {
-        let set = this.foldSets.get(listId);
-        if (!set) {
-            set = new Set<string>();
-            this.foldSets.set(listId, set);
+    /** 读当前列表块的导图布局（没有则回退到设置里的默认布局） */
+    private currentLayout(listId: string): MMLayout {
+        const el = document.querySelector<HTMLElement>(`.list[data-node-id="${listId}"]`);
+        const v = el?.getAttribute(ATTR_VIEW);
+        return (v as MMLayout | null) ?? this.hooks.getOptions().layout;
+    }
+
+    /* ================================================================ 「回到导图」浮动条 */
+
+    /**
+     * 跳回原文编辑之后，在屏幕底部留一个轻提示 + 一键返回。
+     *
+     * 原来的链路是单向的：双击含格式的节点 → 退出导图 → 光标落到原文，
+     * 想回导图得自己再去点列表块的图标。改一个错别字要「离开-改-手动回来」，
+     * 来回三次就没人愿意用了。这条浮动条把回程补上。
+     */
+    private showBackBar(listId: string, layout: MMLayout) {
+        this.hideBackBar();
+
+        const bar = document.createElement("div");
+        bar.className = "mm-backbar";
+        bar.setAttribute("contenteditable", "false");
+
+        const text = document.createElement("span");
+        text.className = "mm-backbar-text";
+        text.textContent = "已回到原文编辑（格式不会丢）";
+
+        const back = document.createElement("button");
+        back.type = "button";
+        back.className = "mm-backbar-btn";
+        back.textContent = "回到导图";
+        back.onclick = (e) => {
+            e.stopPropagation();
+            this.hideBackBar();
+            void this.remount(listId, layout);
+        };
+
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "mm-backbar-x";
+        close.textContent = "✕";
+        close.onclick = (e) => {
+            e.stopPropagation();
+            this.hideBackBar();
+        };
+
+        bar.append(text, back, close);
+        document.body.appendChild(bar);
+        this.backBar = bar;
+        // 15 秒自动收起：它只是个回程引导，不该长期占着屏幕
+        this.backBarTimer = window.setTimeout(() => this.hideBackBar(), 15000);
+    }
+
+    private hideBackBar() {
+        if (this.backBarTimer) {
+            window.clearTimeout(this.backBarTimer);
+            this.backBarTimer = 0;
         }
-        return set;
+        this.backBar?.remove();
+        this.backBar = null;
     }
 
-    /** 供外部（全屏视图）更新折叠状态 */
+    /** 把某个列表块重新挂成导图视图 */
+    private async remount(listId: string, layout: MMLayout) {
+        const el = document.querySelector<HTMLElement>(`.list[data-node-id="${listId}"]`);
+        if (!el) {
+            showMessage("没找到原来的列表块", 3000, "error");
+            return;
+        }
+        this.suppressed.delete(listId);
+        el.setAttribute(ATTR_VIEW, layout);
+        await setBlockAttrs(listId, { [ATTR_VIEW]: layout });
+        window.setTimeout(() => this.scanAll(), 60);
+    }
+
+    /* ================================================================ 折叠同步 */
+
+    /**
+     * 把老版本存在 `custom-mindmap-fold` 里的折叠状态迁到思源原生 `fold` 上。
+     *
+     * 只在**这个列表还没有任何原生折叠**时迁移 —— 否则会把用户后来在大纲里
+     * 亲手折的那几个覆盖掉。迁完就删掉老属性，所以这是纯粹的一次性动作，
+     * 不会在用户的笔记里留下第二套状态。
+     *
+     * 不迁移的后果是实打实的：老用户精心折好的那十几个节点会突然全展开。
+     * 而迁移只是**复原用户自己的选择**，不算插件替用户做决定。
+     */
+    private async migrateLegacyFold(listId: string) {
+        if (this.migrated.has(listId)) return;
+        this.migrated.add(listId);
+        try {
+            const list = document.querySelector<HTMLElement>(`.list[data-node-id="${listId}"]`);
+            if (!list) return;
+            // 已经有原生折叠了 —— 说明这个列表用的是新机制，老属性直接无视
+            if (list.querySelector('.li[fold="1"]')) return;
+
+            const attrs = await getBlockAttrs(listId);
+            const raw = attrs[ATTR_LEGACY_FOLD];
+            if (!raw) return;
+
+            const ids = raw.split(",").map((s) => s.trim()).filter(Boolean);
+            let n = 0;
+            for (const id of ids) {
+                if (!list.querySelector(`.li[data-node-id="${id}"]`)) continue;
+                if (await setOutlineFold(id, true)) n++;
+            }
+            await setBlockAttrs(listId, { [ATTR_LEGACY_FOLD]: null });
+            if (n > 0) showMessage(`已把 ${n} 个折叠状态迁移为思源原生折叠`, 4000);
+        } catch (err) {
+            console.warn("[mindmap] 迁移旧折叠状态失败", listId, err);
+        }
+    }
+
+    /**
+     * 取某个列表的折叠覆盖表（**活的引用**，视图每次 render 都现读）。
+     *
+     * 正常情况返回空表 —— 那时折叠态完全由 DOM 上的 `fold` 决定。
+     */
+    foldOverlay(listId: string): ReadonlyMap<string, boolean> {
+        return this.pendingFold.get(listId) ?? NO_OVERLAY;
+    }
+
+    /**
+     * 把折叠状态写回大纲（导图 → 大纲 这一半）。
+     *
+     * 只做两件事：记进覆盖表、调思源原生的 `foldBlock` / `unfoldBlock`。
+     * 插件**不**再自己存一份折叠状态 —— 内核会把 `fold="1"` 写进 kramdown，
+     * 思源自己就把它持久化进 `.sy`，所以「用户离开时什么状态，下次进来就是什么状态」
+     * 是内核保证的，插件不替用户做决定。
+     *
+     * @param nodeId 节点自身的块 ID（NodeListItem），不是 listId
+     */
     setFold(listId: string, nodeId: string, folded: boolean) {
-        this.updateFold(listId, nodeId, folded);
+        if (!nodeId) return;
+        let m = this.pendingFold.get(listId);
+        if (!m) {
+            m = new Map();
+            this.pendingFold.set(listId, m);
+        }
+        m.set(nodeId, folded);
+        void this.writeFold(listId, nodeId, folded);
     }
 
-    private updateFold(listId: string, nodeId: string, folded: boolean) {
-        const set = this.foldSets.get(listId);
-        if (!set) return;
-        if (folded) set.add(nodeId);
-        else set.delete(nodeId);
+    /** 写一次内核，并安排核对（核对失败会重试） */
+    private async writeFold(listId: string, nodeId: string, folded: boolean) {
+        const ok = await setOutlineFold(nodeId, folded);
+        if (!ok) console.warn("[mindmap] 折叠写回失败", listId, nodeId, folded);
+        this.scheduleFoldReconcile(listId);
+    }
 
-        if (!this.hooks.getOptions().persistFold) return;
-
-        const prev = this.persistTimers.get(listId);
+    /**
+     * 等内核把 DOM 更新完，再比对覆盖表，把**已经兑现**的条目删掉。
+     *
+     * 核对的意义在于：覆盖表只该活在「写入在途」的那几百毫秒里。如果一直留着，
+     * 它就从「补空窗」变成了「第二个真相源」—— 用户之后在大纲里折同一个节点，
+     * 导图会因为表里那条旧记录而无动于衷。
+     */
+    private scheduleFoldReconcile(listId: string, tries = 0) {
+        const prev = this.foldTimers.get(listId);
         if (prev) window.clearTimeout(prev);
         const timer = window.setTimeout(() => {
-            this.persistTimers.delete(listId);
-            const value = Array.from(set).join(",");
-            void setBlockAttrs(listId, { [ATTR_FOLD]: value || null });
-        }, 600);
-        this.persistTimers.set(listId, timer);
+            this.foldTimers.delete(listId);
+            this.reconcileFold(listId, tries);
+        }, FOLD_SETTLE_MS);
+        this.foldTimers.set(listId, timer);
+    }
+
+    /** 覆盖表的收尾：兑现的删掉、没兑现的再写一次、实在写不进去就认输 */
+    private reconcileFold(listId: string, tries: number) {
+        const m = this.pendingFold.get(listId);
+        if (!m || m.size === 0) {
+            this.pendingFold.delete(listId);
+            return;
+        }
+
+        const list = document.querySelector<HTMLElement>(`.list[data-node-id="${listId}"]`);
+        if (!list) {
+            // 列表已经不在了（用户关掉导图 / 块被删）—— 覆盖表没有意义了
+            this.pendingFold.delete(listId);
+            return;
+        }
+
+        const retry: Array<[string, boolean]> = [];
+        for (const [id, want] of Array.from(m)) {
+            const li = list.querySelector<HTMLElement>(`.li[data-node-id="${id}"]`);
+            if (!li) {
+                m.delete(id); // 块没了（被删 / 被移出这个列表）
+                continue;
+            }
+            if ((li.getAttribute("fold") === "1") === want) {
+                m.delete(id); // 内核追上了，覆盖表可以退场
+            } else {
+                retry.push([id, want]);
+            }
+        }
+        if (m.size === 0) {
+            this.pendingFold.delete(listId);
+            return;
+        }
+
+        if (tries >= FOLD_MAX_TRIES) {
+            // 写不进去就别硬撑了 —— 松开覆盖表，让画面回到大纲的真实状态，
+            // 免得导图显示一个连大纲都没有的折叠态，那才是真的骗人。
+            console.warn("[mindmap] 折叠状态写入内核失败，已放弃", listId, Array.from(m));
+            this.pendingFold.delete(listId);
+            return;
+        }
+
+        for (const [id, want] of retry) void setOutlineFold(id, want);
+        this.scheduleFoldReconcile(listId, tries + 1);
     }
 
     /* ================================================================ 变更侦测 */
