@@ -27,11 +27,92 @@ function resolveCssValue(value: string, depth = 0): string {
     return next === value ? value : resolveCssValue(next, depth + 1);
 }
 
+/**
+ * 把节点 HTML 里对**宿主变量**（`--b3-*`）的引用解析成具体色值。
+ *
+ * 文字颜色 / 背景色 / 字号是思源写在行内 style 里的，形如
+ *   <span data-type="text" style="color: var(--b3-font-color1)">
+ * 在思源页面里这些变量有值，所以看起来正常；**一旦导出到思源之外就全变黑**。
+ * 导出发生在思源页面里，此刻 `getComputedStyle(documentElement)` 能读到真实值，
+ * 顺手固化下来即可。
+ */
+function inlineHostVars(html: string): string {
+    return html.replace(/style="([^"]*)"/g, (whole, css: string) => {
+        if (!css.includes("var(--b3-")) return whole;
+        const resolved = css.replace(
+            /var\(\s*(--b3-[\w-]+)\s*(?:,\s*([^)]*))?\)/g,
+            (_m, name: string, fallback: string) => {
+                const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+                // 兜底用 inherit 而不是空串 —— 空串会让整条声明失效
+                return v || fallback || "inherit";
+            },
+        );
+        return `style="${escapeAttr(resolved)}"`;
+    });
+}
+
+/**
+ * 把节点里的图片转成 data URI。
+ *
+ * 两个理由：① SVG 是独立文件，里面的 `assets/xxx.png` 是相对路径，换个地方打开就找不到图；
+ * ② PNG 光栅化走的是 `foreignObject → canvas`，canvas 只要被「非同源图片」碰过就会被污染，
+ * `toBlob` 直接抛 SecurityError。
+ */
+async function inlineImages(html: string): Promise<string> {
+    const box = document.createElement("div");
+    box.innerHTML = html;
+    const imgs = Array.from(box.querySelectorAll("img"));
+    if (imgs.length === 0) return html;
+
+    await Promise.all(
+        imgs.map(async (img) => {
+            const src = img.getAttribute("src") ?? "";
+            if (!src || src.startsWith("data:")) return;
+            try {
+                img.setAttribute("src", await toDataUri(src));
+            } catch (err) {
+                console.warn("[mindmap] 图片转 data URI 失败，导出里会保留原地址", src, err);
+            }
+        }),
+    );
+    return box.innerHTML;
+}
+
+async function toDataUri(src: string): Promise<string> {
+    const abs = new URL(src, location.href).href;
+    const res = await fetch(abs);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    return new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error("FileReader 失败"));
+        reader.readAsDataURL(blob);
+    });
+}
+
+/**
+ * 找思源的 KaTeX 样式表并内联。
+ *
+ * 不内联的话，导出的文件里公式会散成一堆乱字符 —— `.katex` 那一堆规则
+ * 全靠宿主 CSS 提供，插件自己的样式表里没有。
+ */
+async function katexCss(): Promise<string> {
+    const link = document.querySelector<HTMLLinkElement>('link[href*="katex"]');
+    if (!link) return "";
+    try {
+        const res = await fetch(link.href);
+        return res.ok ? await res.text() : "";
+    } catch {
+        return "";
+    }
+}
+
 function escapeAttr(s: string): string {
     return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
 }
 
-export function buildSvg(rootEl: HTMLElement): string {
+export async function buildSvg(rootEl: HTMLElement): Promise<string> {
     const { world, edges, nodes } = worldParts(rootEl);
 
     const W = Math.ceil(parseFloat(world.style.width) || world.offsetWidth);
@@ -46,12 +127,15 @@ export function buildSvg(rootEl: HTMLElement): string {
     const bg = resolveCssValue(vars["--mm-canvas-solid"] ?? "#ffffff");
     const font = resolveCssValue(vars["--mm-font"] ?? "sans-serif");
 
-    const nodeHtml = nodes.innerHTML;
+    // 先把图片换成 data URI，再固化宿主颜色变量
+    const nodeHtml = inlineHostVars(await inlineImages(nodes.innerHTML));
+    const katex = await katexCss();
 
     return [
         `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`,
         `<style><![CDATA[`,
         PLUGIN_CSS,
+        katex,
         `.mm-root.mm-export{display:block;position:relative;width:${W}px;height:${H}px;margin:0;padding:0;border:0;border-radius:0;box-shadow:none;background:transparent;}`,
         `.mm-root.mm-export .mm-nodes{position:absolute;left:0;top:0;}`,
         `.mm-root.mm-export .mm-toolbar,.mm-root.mm-export .mm-viewport{display:none;}`,
@@ -84,12 +168,12 @@ function download(blob: Blob, filename: string) {
 }
 
 export async function exportSvg(rootEl: HTMLElement, title: string): Promise<void> {
-    const svg = buildSvg(rootEl);
+    const svg = await buildSvg(rootEl);
     download(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }), `${safeName(title)}.svg`);
 }
 
 export async function exportPng(rootEl: HTMLElement, title: string, scale = 2): Promise<void> {
-    const svg = buildSvg(rootEl);
+    const svg = await buildSvg(rootEl);
     const { world } = worldParts(rootEl);
     const W = Math.ceil(parseFloat(world.style.width) || world.offsetWidth);
     const H = Math.ceil(parseFloat(world.style.height) || world.offsetHeight);

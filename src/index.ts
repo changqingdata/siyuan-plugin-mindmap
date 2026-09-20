@@ -1,4 +1,4 @@
-import { Dialog, Plugin, Setting, showMessage } from "siyuan";
+import { Dialog, Plugin, Setting, openTab, showMessage } from "siyuan";
 import type { IMenu, subMenu } from "siyuan";
 
 import { ATTR_LEGACY_VIEW, ATTR_VIEW, DEFAULT_CONFIG } from "./types";
@@ -58,6 +58,7 @@ export default class MindMapPlugin extends Plugin {
             getOptions: () => this.config,
             onLayoutChange: (listId, layout) => this.persistLayout(listId, layout),
             onFullscreen: (listId, _root, _theme, title) => this.openFullscreen(listId, title),
+            openBlock: (id) => this.openBlockTab(id),
         });
 
         this.registerBlockMenu();
@@ -185,6 +186,18 @@ export default class MindMapPlugin extends Plugin {
         void setBlockAttrs(listId, { [ATTR_VIEW]: layout });
     }
 
+    /**
+     * 打开一个块的页签（导图里 Ctrl+单击双链时用）。
+     * 交给思源自己的 openTab，复用它的缩放、光标定位等行为。
+     */
+    private openBlockTab(id: string) {
+        if (!id) return;
+        void openTab({ app: this.app, doc: { id, zoomIn: false } }).catch((err) => {
+            console.warn("[mindmap] 打开块失败", id, err);
+            showMessage("打开失败，块可能已被删除", 3000, "error");
+        });
+    }
+
     /* ================================================================ 全屏查看 */
 
     private openFullscreen(listId: string, title: string) {
@@ -217,6 +230,12 @@ export default class MindMapPlugin extends Plugin {
             {
                 onFoldChange: (nodeId, folded) => this.scanner.setFold(listId, nodeId, folded),
                 onLocate: () => undefined,
+                // 全屏里没法就地改含格式的节点：先关掉弹层，再把光标送回源列表
+                onEditInSource: (node) => {
+                    dialog.destroy();
+                    this.scanner.editInSource(listId, node);
+                },
+                onOpenBlock: (nodeId) => this.openBlockTab(nodeId),
                 onExit: () => dialog.destroy(),
                 onLayoutChange: (layout) => this.persistLayout(listId, layout),
                 onFullscreen: () => undefined,

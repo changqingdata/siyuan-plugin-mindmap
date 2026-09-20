@@ -22,6 +22,7 @@ import {
     canMoveDown,
     canMoveUp,
     canOutdent,
+    hasInlineFormat,
     isAncestor,
     serializeSubtree,
 } from "./tree";
@@ -32,6 +33,11 @@ export interface ViewCallbacks {
     onFoldChange: (id: string, folded: boolean) => void;
     /** 定位到正文块 */
     onLocate: (id: string) => void;
+    /**
+     * 回到源列表里编辑这个节点。
+     * 含行内格式的节点只能这么改 —— 就地编辑写回的是纯文本，会把格式抹掉。
+     */
+    onEditInSource: (node: MMNode) => void;
     /** 退出导图视图 */
     onExit: () => void;
     /** 布局发生变化（会写回块属性） */
@@ -42,6 +48,8 @@ export interface ViewCallbacks {
     onRename: (node: MMNode, text: string) => void;
     /** 结构操作：增删 / 升降级 / 上下移 / 拖拽 / 复制 */
     onNodeAction: (kind: MMActionKind, node: MMNode, opts?: MMActionExtra) => void;
+    /** 打开一个块（双链的目标）—— 一般是打开它所在的页签 */
+    onOpenBlock: (id: string) => void;
     /**
      * 撤销 / 重做。返回「插件是否接管了这个键」——
      * 返回 false 表示自己的栈是空的，Ctrl+Z 应该继续冒泡给思源自己的撤销栈。
@@ -1009,6 +1017,25 @@ export class MindMapView {
             e.stopPropagation();
             // 拖拽刚结束的那次 click 要丢掉
             if (this.suppressClick) return;
+            const t = e.target as HTMLElement | null;
+
+            // 图片：单击放大看原图。导图里的图是缩略图，用户点它就是想知道「原图长什么样」，
+            // 所以这里直接接管，不再去选中节点。
+            const img = t?.closest?.("img") as HTMLImageElement | null;
+            if (img) {
+                this.zoomImage(img);
+                return;
+            }
+
+            // 链接 / 双链：Ctrl（macOS 上是 Cmd）或 Alt + 单击打开。
+            // 为什么不是裸单击 —— mousedown 上做了 preventDefault（为了不让 Protyle 抢焦点），
+            // 裸单击已经是「选中节点」，再占用会打架；而且思源自己的习惯也是 Ctrl+单击开链接。
+            const link = t?.closest?.('[data-type="a"], [data-type="block-ref"]') as HTMLElement | null;
+            if (link && (e.ctrlKey || e.metaKey || e.altKey)) {
+                this.openInlineTarget(link);
+                return;
+            }
+
             this.rootEl.focus({ preventScroll: true });
             if (e.shiftKey || e.ctrlKey || e.metaKey) this.toggleMulti(n);
             else this.select(n);
@@ -1431,13 +1458,26 @@ export class MindMapView {
 
     /**
      * 进入编辑态。
-     * 编辑的是纯文本 —— 提交时用 markdown 更新内容块，
-     * 因此节点内的行内格式（加粗、行内代码等）在改名后不会保留。
+     *
+     * **两条路，按节点内容分流**（这是「改名会抹掉格式」那个数据破坏问题的修法）：
+     *
+     * - **纯文本节点** → 就地改。写回的是 `escapeMd(textContent)`，不会丢任何东西，
+     *   而且不用离开导图，体验最轻快。
+     * - **含行内格式的节点**（加粗 / 双链 / 公式 / 图片 / 颜色……）→ **回到源列表改**。
+     *   就地编辑提交时只能拿到 `textContent`，双链、公式、加粗会被**静默重建成纯文本**
+     *   写进笔记（实测：`加粗 **粗体** 斜体 *斜体*` 改名后只剩 `改过`）。
+     *   视觉上因为还原了 `savedHtml` 当场看不出来，所以这条必须堵死。
      */
     private beginEdit(n: MMNode) {
         if (!this.options.editable || !n.contentId) return;
         const el = n.el;
         if (!el || el.hasAttribute(EDIT_FLAG)) return;
+
+        if (hasInlineFormat(n)) {
+            this.cb.onEditInSource(n);
+            return;
+        }
+
         const txt = el.querySelector<HTMLElement>(".mm-txt");
         if (!txt) return;
 
@@ -1505,6 +1545,62 @@ export class MindMapView {
         txt.addEventListener("paste", onPaste);
     }
 
+    /* ==================================================================== 行内交互 */
+
+    /**
+     * 打开节点里的链接 / 双链。
+     *
+     * 之前这两个元素在导图里**完全点不动**：`mousedown` 上为了保焦点做了 preventDefault，
+     * 裸单击又是「选中节点」，没有任何入口能打开它们。
+     */
+    private openInlineTarget(el: HTMLElement) {
+        const type = el.dataset.type;
+        if (type === "a") {
+            const href = el.dataset.href || el.getAttribute("href") || "";
+            if (href) window.open(href, "_blank", "noopener,noreferrer");
+            else showMessage("这个链接没有地址", 2000);
+            return;
+        }
+        const id = el.dataset.id;
+        if (id) this.cb.onOpenBlock(id);
+        else showMessage("这个双链没有目标块", 2000);
+    }
+
+    /** 图片放大：遮罩层里看原图，点任意处或 Esc 关闭 */
+    private zoomImage(img: HTMLImageElement) {
+        const src = img.currentSrc || img.src;
+        if (!src) return;
+
+        const mask = document.createElement("div");
+        mask.className = "mm-lightbox";
+        mask.setAttribute("contenteditable", "false");
+
+        const big = document.createElement("img");
+        big.src = src;
+        big.alt = img.alt || "";
+
+        mask.appendChild(big);
+
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== "Escape") return;
+            e.preventDefault();
+            e.stopPropagation();
+            close();
+        };
+        const close = () => {
+            document.removeEventListener("keydown", onKey, true);
+            mask.remove();
+        };
+
+        mask.onclick = (e) => {
+            e.stopPropagation();
+            close();
+        };
+        // 捕获阶段监听：思源的 Dialog / Protyle 会抢键盘，Esc 得先到我们手里
+        document.addEventListener("keydown", onKey, true);
+        document.body.appendChild(mask);
+    }
+
     /* ==================================================================== 菜单 */
 
     private openNodeMenu(n: MMNode, event: MouseEvent) {
@@ -1516,7 +1612,10 @@ export class MindMapView {
             menu.addItem({ label: key ? `${label}    ${key}` : label, disabled, click });
         };
 
-        item("编辑文字", "F2", !this.options.editable || !canEdit(n), () => this.beginEdit(n));
+        const rich = hasInlineFormat(n);
+        item(rich ? "回到原文编辑（保留格式）" : "编辑文字", "F2", !this.options.editable || !canEdit(n), () =>
+            this.beginEdit(n),
+        );
         item("插入子节点", "Tab", false, () => act("insertChild"));
         item("在下方插入", "Enter", false, () => act("insertSiblingAfter"));
         menu.addItem({ type: "separator" });

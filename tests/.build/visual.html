@@ -488,6 +488,8 @@
     text-underline-offset: 2px;
     text-decoration-style: dotted;
     cursor: pointer;
+    /* 长 URL 不换行会把节点撑得极宽（实测能顶到 310px，远超 max-width） */
+    word-break: break-all;
 }
 
 .mm-root .mm-txt [data-type="tag"] {
@@ -495,17 +497,30 @@
     padding: 1px 6px;
     border-radius: 10px;
     background: color-mix(in srgb, var(--mm-node-text) 13%, transparent);
+    word-break: break-all;
 }
 
 .mm-root .mm-txt [data-type="inline-math"] {
     font-style: italic;
 }
 
+/* 图片：缩略图形态。Protyle 用 <span data-type="img"><img></span> 包一层 */
+.mm-root .mm-txt [data-type="img"] {
+    display: inline-flex;
+    align-items: center;
+    vertical-align: middle;
+}
+
 .mm-root .mm-txt img {
-    max-height: 18px;
+    max-width: 200px;
+    max-height: 48px;
     width: auto;
-    border-radius: 3px;
-    vertical-align: -3px;
+    height: auto;
+    object-fit: contain;
+    border-radius: 4px;
+    vertical-align: middle;
+    /* 单击放大看原图（见 renderer 的 zoomImage） */
+    cursor: zoom-in;
 }
 
 .mm-root .mm-txt sup,
@@ -978,6 +993,28 @@
 
 .mm-root.mm-hc .mm-d0 .mm-inner {
     border: 2px solid var(--mm-root-text);
+}
+
+/* ---------------------------------------------------------------- 图片放大 */
+
+.mm-lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6vh 6vw;
+    background: rgba(0, 0, 0, 0.62);
+    cursor: zoom-out;
+}
+
+.mm-lightbox img {
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: 6px;
+    background: #fff;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
 }
 
 </style>

@@ -17,6 +17,7 @@ import {
     canMoveUp,
     canOutdent,
     escapeMd,
+    hasInlineFormat,
     indexInParent,
     isAncestor,
     markerOf,
@@ -155,6 +156,25 @@ eq(zwItems.length, 1, "只含零宽字符的列表项按空节点丢弃");
 eq(zwItems[0].text, "零宽节点", "文本里的零宽字符被清掉");
 eq(zwItems[0].html, "零宽节点", "HTML 里的零宽字符也被清掉");
 eq(serializeSubtree(zwItems[0]), "- 零宽节点", "序列化结果不含零宽字符");
+
+/*
+ * 「有没有文字」不能代表「有没有内容」。
+ * <img> 的 textContent 是空的，KaTeX 公式的 textContent 只是公式源码，
+ * 判据只看 text 的话，纯图片项和纯公式项会被当成空行整个丢掉。
+ */
+const withRich = list("u", "LR", [
+    li("R1", p("PR1", "", '<span data-type="img"><img src="assets/a.png" alt=""></span>')),
+    li("R2", p("PR2", "", '<span data-type="inline-math" data-subtype="math" data-content="E=mc^2"></span>')),
+    li("R3", p("PR3", "   ")),
+]);
+const richItems = parseList(el(withRich));
+eq(richItems.length, 2, "纯图片项与纯公式项保留，只有真空项被丢");
+eq(richItems[0].text, "", "纯图片项确实没有文字");
+eq(richItems[1].text, "", "纯公式项确实没有文字");
+
+// 只含 <br> 的项仍然算空
+const onlyBr = list("u", "LB", [li("B1", p("PB1", "", "<br>")), li("B2", p("PB2", "有内容"))]);
+eq(parseList(el(onlyBr)).length, 1, "只含 <br> 的项按空节点丢弃");
 
 /* -------------------------------------------------------------- 2. 装饰结果 */
 
@@ -355,6 +375,68 @@ const mk = (o: Partial<MMNode>) => o as unknown as MMNode;
     eq(lines[1], "  1. 第一项", "子层级缩进两格且跟随有序列表类型");
     eq(lines[2], "    - 叶子", "孙层级继续缩进且跟随无序列表类型");
     eq(lines[3], "  1. 第二项", "同级子项缩进一致");
+}
+
+// 5.4b 副本序列化必须带上行内格式
+//
+// 原先用的是 escapeMd(node.text) —— 纯文本，于是「边界位置的降级/升级」「快速复制」
+// 「Ctrl+C 再 Ctrl+V」会把整棵子树的双链、公式、加粗**静默重建成纯文本**，
+// 而且块 ID 也会重建。实测依据见 tests/kernel/copy-fidelity.mjs。
+{
+    const rich = parseList(
+        el(
+            list("u", "LS", [
+                li("S1", p("PS1", "粗体 普通", '<span data-type="strong">粗体</span> 普通')),
+                li("S2", p("PS2", "1. 看起来像列表")),
+                li("S3", p("PS3", "", '<span data-type="img"><img src="assets/pic.png" alt="照片"></span>')),
+                li("S4", p("PS4", "上下", '<span data-type="strong">上</span>\n<span data-type="em">下</span>')),
+                li(
+                    "S5",
+                    p("PS5", "红字", '<span data-type="text" style="color: var(--b3-font-color1)">红字</span>'),
+                ),
+            ]),
+        ),
+    );
+    eq(serializeSubtree(rich[0]), '- <span data-type="strong">粗体</span> 普通', "含格式的节点保留 HTML");
+    eq(serializeSubtree(rich[1]), "- 1\\. 看起来像列表", "纯文本节点仍然转义 markdown 元字符");
+    eq(serializeSubtree(rich[2]), "- ![照片](assets/pic.png)", "图片转成 markdown 语法");
+    eq(
+        serializeSubtree(rich[3]),
+        '- <span data-type="strong">上</span> <span data-type="em">下</span>',
+        "内容里的换行压成空格，不破坏列表结构",
+    );
+    eq(
+        serializeSubtree(rich[4]),
+        '- <span data-type="text" style="color: var(--b3-font-color1)">红字</span>',
+        "颜色内联样式原样保留",
+    );
+
+    // 子树要跟着一起走，且每层都保格式
+    // 注意 wrapRoot 对「只有一个顶层项」会直接返回该项本身，所以这里从 nested 起算
+    const nested = wrapRoot(
+        parseList(
+            el(
+                list("u", "LT", [
+                    li(
+                        "T1",
+                        p("PT1", "父 子", '<span data-type="strong">父</span>'),
+                        list("u", "LT2", [li("T2", p("PT2", "子", '<span data-type="em">子</span>'))]),
+                    ),
+                ]),
+            ),
+        ),
+        "导图",
+    );
+    const out = serializeSubtree(nested).split("\n");
+    eq(out.length, 2, "子树一起序列化");
+    eq(out[0], '- <span data-type="strong">父</span>', "父节点保格式");
+    eq(out[1], '  - <span data-type="em">子</span>', "子节点保格式且缩进");
+
+    // 改名走哪条路由这个判据决定：
+    // 含格式 → 回到源列表改（就地改会把格式抹掉）；纯文本 → 就地改（轻快且无损）
+    eq(hasInlineFormat(rich[0]), true, "含格式的节点必须回到原文编辑");
+    eq(hasInlineFormat(rich[2]), true, "纯图片节点也必须回到原文编辑");
+    eq(hasInlineFormat(rich[1]), false, "纯文本节点可以就地改名");
 }
 
 // 5.5 markdown 转义（改名是纯文本语义，不能被解析成结构）

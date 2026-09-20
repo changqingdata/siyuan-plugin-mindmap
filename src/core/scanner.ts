@@ -24,6 +24,8 @@ export interface ScannerHooks {
     onLayoutChange: (listId: string, layout: MMLayout) => void;
     /** 打开全屏查看 */
     onFullscreen: (listId: string, root: MMNode, theme: MMTheme, title: string) => void;
+    /** 打开一个块（双链的目标）—— 由插件层用 openTab 实现 */
+    openBlock: (id: string) => void;
 }
 
 const SELECTOR = `.list[${ATTR_VIEW}]`;
@@ -391,6 +393,8 @@ export class Scanner {
                 {
                     onFoldChange: (nodeId, folded) => this.updateFold(id, nodeId, folded),
                     onLocate: (nodeId) => this.locate(id, nodeId),
+                    onEditInSource: (node) => this.editInSource(id, node),
+                    onOpenBlock: (nodeId) => this.hooks.openBlock(nodeId),
                     onExit: () => this.exitView(id),
                     onLayoutChange: (layout) => this.hooks.onLayoutChange(id, layout),
                     onFullscreen: (root, theme) => this.hooks.onFullscreen(id, root, theme, title),
@@ -634,6 +638,54 @@ export class Scanner {
         // 目标块在导图模式下被隐藏，先退出视图再滚动定位
         this.exitView(listId);
         window.setTimeout(() => scrollToBlock(nodeId), 80);
+    }
+
+    /**
+     * 回到源列表里编辑这个节点 —— 含行内格式的节点只能这么改。
+     *
+     * 为什么不让它在导图里就地编辑：就地编辑提交时只能拿到 `textContent`，
+     * 写回内核的也是纯文本，于是该节点的**双链、公式、加粗会被静默抹掉**
+     * （实测 `加粗 **粗体** 斜体 *斜体*` 改名后只剩 `改过`）。
+     * 视觉上因为当场还原了 HTML，用户根本看不出来，等发现时笔记已经坏了。
+     *
+     * 代价是要退出导图视图（源列表在导图模式下是 display:none，没法同时看两边），
+     * 改完再点列表块的图标进来即可。换来的是零格式损失，值。
+     */
+    editInSource(listId: string, node: MMNode) {
+        const contentId = node.contentId;
+        if (!contentId) return;
+        this.exitView(listId);
+
+        window.setTimeout(() => {
+            const block = document.querySelector<HTMLElement>(`.protyle-wysiwyg [data-node-id="${contentId}"]`);
+            if (!block) {
+                showMessage("没找到对应的段落，内容可能已被改动", 3000, "error");
+                return;
+            }
+            block.scrollIntoView({ block: "center", behavior: "smooth" });
+
+            // Protyle 的段落外壳本身不可编辑，可编辑的是里面那个 [contenteditable="true"]
+            const editable = block.querySelector<HTMLElement>('[contenteditable="true"]') ?? block;
+            editable.focus();
+            try {
+                const range = document.createRange();
+                range.selectNodeContents(editable);
+                // 光标落在**末尾**，不做全选。
+                // 全选看着方便（可以直接改写），但用户一打字就替换掉整段内容 ——
+                // 连带把双链、公式、加粗一起清掉，正好是我们想避免的。
+                // 最常见的诉求是「改个错别字」，光标落末尾最安全；要全选用户自己 Ctrl+A。
+                range.collapse(false);
+                const sel = window.getSelection();
+                sel?.removeAllRanges();
+                sel?.addRange(range);
+            } catch {
+                /* 选区失败不影响编辑 */
+            }
+
+            block.classList.add("mm-flash");
+            window.setTimeout(() => block.classList.remove("mm-flash"), 1400);
+            showMessage("已回到原文编辑（格式不会丢）；改完点列表块的图标可再次进入导图", 5000);
+        }, 120);
     }
 
     /** 取某个列表块的折叠状态集合（全屏视图复用） */

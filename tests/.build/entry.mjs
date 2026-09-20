@@ -1,5 +1,6 @@
 // src/core/parser.ts
 var ZERO_WIDTH = /[\u200B-\u200D\u2060\uFEFF]/g;
+var HAS_TAG = /<(?!br\s*\/?>)[a-z!/][^>]*>/i;
 function cleanText(s) {
   return s.replace(ZERO_WIDTH, "").trim();
 }
@@ -23,7 +24,8 @@ function parseList(listEl, path = "") {
     const children = subList ? parseList(subList, order) : [];
     const html = contentEl ? sanitizeInline(contentEl.innerHTML) : "";
     const text = cleanText(contentEl?.textContent ?? "");
-    if (!text && children.length === 0) continue;
+    const hasRich = HAS_TAG.test(html);
+    if (!text && !hasRich && children.length === 0) continue;
     items2.push({
       id: li2.dataset.nodeId ?? "",
       contentId: contentEl?.dataset.nodeId ?? "",
@@ -71,8 +73,45 @@ function findSubListEl(li2) {
   }
   return null;
 }
+var DROP_SELECTOR = '[class*="protyle-"], .img__net';
 function sanitizeInline(html) {
-  return html.replace(ZERO_WIDTH, "").replace(/\scontenteditable="[^"]*"/g, "").replace(/\sspellcheck="[^"]*"/g, "").replace(/\sdata-render="[^"]*"/g, "").replace(/\sclass="protyle-wysiwyg--select"/g, "").trim();
+  const basic = sanitizeByRegex(html);
+  if (!basic) return "";
+  if (typeof document === "undefined" || typeof document.createElement !== "function") return basic;
+  try {
+    return sanitizeByDom(basic) || basic;
+  } catch {
+    return basic;
+  }
+}
+function sanitizeByRegex(html) {
+  return html.replace(ZERO_WIDTH, "").replace(/\scontenteditable="(?!false)[^"]*"/g, "").replace(/\sspellcheck="[^"]*"/g, "").replace(/\sdata-render="[^"]*"/g, "").replace(/\sclass="protyle-wysiwyg--select"/g, "").trim();
+}
+function sanitizeByDom(html) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  const frag = tpl.content;
+  if (!frag) return html;
+  frag.querySelectorAll(DROP_SELECTOR).forEach((el2) => el2.remove());
+  frag.querySelectorAll("img").forEach((img) => {
+    const real = img.getAttribute("data-src") || img.getAttribute("src") || "";
+    if (real) img.setAttribute("src", real);
+    img.removeAttribute("loading");
+    img.removeAttribute("data-src");
+  });
+  frag.querySelectorAll("*").forEach((el2) => {
+    const ce = el2.getAttribute("contenteditable");
+    if (ce !== null && ce !== "false") el2.removeAttribute("contenteditable");
+    el2.removeAttribute("spellcheck");
+    el2.removeAttribute("data-render");
+    if (el2.classList?.contains("protyle-wysiwyg--select")) el2.classList.remove("protyle-wysiwyg--select");
+  });
+  frag.querySelectorAll("span").forEach((el2) => {
+    if (el2.attributes.length === 0 && el2.children.length === 0 && !(el2.textContent ?? "").trim()) el2.remove();
+  });
+  const box = document.createElement("div");
+  box.appendChild(frag);
+  return box.innerHTML.trim();
 }
 function escapeHtml(s) {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -407,6 +446,22 @@ function escapeMd(text) {
   s = s.replace(/^(\s*)(\d+)([.)])/, (_m, sp, num, dot) => `${sp}${num}\\${dot}`);
   return s;
 }
+var HAS_TAG2 = /<(?!br\s*\/?>)[a-z!/][^>]*>/i;
+function hasInlineFormat(node) {
+  return HAS_TAG2.test(node.html ?? "");
+}
+var IMG_SPAN_RE = /<span[^>]*data-type="img"[^>]*>\s*<img\b([^>]*?)\/?>\s*<\/span>/gi;
+var IMG_RE = /<img\b([^>]*?)\/?>/gi;
+function inlineOf(node) {
+  const html = (node.html ?? "").trim();
+  if (!html || !HAS_TAG2.test(html)) return escapeMd(node.text);
+  const imgMd = (attrs) => {
+    const src = attrs.match(/\bsrc="([^"]*)"/i)?.[1] ?? "";
+    const alt = (attrs.match(/\balt="([^"]*)"/i)?.[1] ?? "").replace(/[[\]()]/g, "");
+    return src ? `![${alt}](${src})` : "";
+  };
+  return html.replace(/\r?\n+/g, " ").replace(IMG_SPAN_RE, (_m, attrs) => imgMd(attrs)).replace(IMG_RE, (_m, attrs) => imgMd(attrs)).trim();
+}
 function markerOf(node) {
   if (node.kind === "task") return "- [ ]";
   if (node.numbered) return "1.";
@@ -419,7 +474,7 @@ function newItemMarkdown(ref) {
 }
 function serializeSubtree(node, depth = 0) {
   const indent = "  ".repeat(depth);
-  const line = `${indent}${markerOf(node)} ${escapeMd(node.text)}`;
+  const line = `${indent}${markerOf(node)} ${inlineOf(node)}`;
   if (node.children.length === 0) return line;
   return [line, ...node.children.map((c) => serializeSubtree(c, depth + 1))].join("\n");
 }
@@ -528,6 +583,17 @@ eq(zwItems.length, 1, "\u53EA\u542B\u96F6\u5BBD\u5B57\u7B26\u7684\u5217\u8868\u9
 eq(zwItems[0].text, "\u96F6\u5BBD\u8282\u70B9", "\u6587\u672C\u91CC\u7684\u96F6\u5BBD\u5B57\u7B26\u88AB\u6E05\u6389");
 eq(zwItems[0].html, "\u96F6\u5BBD\u8282\u70B9", "HTML \u91CC\u7684\u96F6\u5BBD\u5B57\u7B26\u4E5F\u88AB\u6E05\u6389");
 eq(serializeSubtree(zwItems[0]), "- \u96F6\u5BBD\u8282\u70B9", "\u5E8F\u5217\u5316\u7ED3\u679C\u4E0D\u542B\u96F6\u5BBD\u5B57\u7B26");
+var withRich = list("u", "LR", [
+  li("R1", p("PR1", "", '<span data-type="img"><img src="assets/a.png" alt=""></span>')),
+  li("R2", p("PR2", "", '<span data-type="inline-math" data-subtype="math" data-content="E=mc^2"></span>')),
+  li("R3", p("PR3", "   "))
+]);
+var richItems = parseList(el(withRich));
+eq(richItems.length, 2, "\u7EAF\u56FE\u7247\u9879\u4E0E\u7EAF\u516C\u5F0F\u9879\u4FDD\u7559\uFF0C\u53EA\u6709\u771F\u7A7A\u9879\u88AB\u4E22");
+eq(richItems[0].text, "", "\u7EAF\u56FE\u7247\u9879\u786E\u5B9E\u6CA1\u6709\u6587\u5B57");
+eq(richItems[1].text, "", "\u7EAF\u516C\u5F0F\u9879\u786E\u5B9E\u6CA1\u6709\u6587\u5B57");
+var onlyBr = list("u", "LB", [li("B1", p("PB1", "", "<br>")), li("B2", p("PB2", "\u6709\u5185\u5BB9"))]);
+eq(parseList(el(onlyBr)).length, 1, "\u53EA\u542B <br> \u7684\u9879\u6309\u7A7A\u8282\u70B9\u4E22\u5F03");
 console.log("[2] \u88C5\u9970\uFF08\u6DF1\u5EA6 / \u5206\u652F\u8272 / \u7F16\u53F7\uFF09");
 var PALETTE = ["#111111", "#222222", "#333333"];
 var root = wrapRoot(items, "\u5BFC\u56FE");
@@ -681,6 +747,56 @@ var mk = (o) => o;
   eq(lines[1], "  1. \u7B2C\u4E00\u9879", "\u5B50\u5C42\u7EA7\u7F29\u8FDB\u4E24\u683C\u4E14\u8DDF\u968F\u6709\u5E8F\u5217\u8868\u7C7B\u578B");
   eq(lines[2], "    - \u53F6\u5B50", "\u5B59\u5C42\u7EA7\u7EE7\u7EED\u7F29\u8FDB\u4E14\u8DDF\u968F\u65E0\u5E8F\u5217\u8868\u7C7B\u578B");
   eq(lines[3], "  1. \u7B2C\u4E8C\u9879", "\u540C\u7EA7\u5B50\u9879\u7F29\u8FDB\u4E00\u81F4");
+}
+{
+  const rich = parseList(
+    el(
+      list("u", "LS", [
+        li("S1", p("PS1", "\u7C97\u4F53 \u666E\u901A", '<span data-type="strong">\u7C97\u4F53</span> \u666E\u901A')),
+        li("S2", p("PS2", "1. \u770B\u8D77\u6765\u50CF\u5217\u8868")),
+        li("S3", p("PS3", "", '<span data-type="img"><img src="assets/pic.png" alt="\u7167\u7247"></span>')),
+        li("S4", p("PS4", "\u4E0A\u4E0B", '<span data-type="strong">\u4E0A</span>\n<span data-type="em">\u4E0B</span>')),
+        li(
+          "S5",
+          p("PS5", "\u7EA2\u5B57", '<span data-type="text" style="color: var(--b3-font-color1)">\u7EA2\u5B57</span>')
+        )
+      ])
+    )
+  );
+  eq(serializeSubtree(rich[0]), '- <span data-type="strong">\u7C97\u4F53</span> \u666E\u901A', "\u542B\u683C\u5F0F\u7684\u8282\u70B9\u4FDD\u7559 HTML");
+  eq(serializeSubtree(rich[1]), "- 1\\. \u770B\u8D77\u6765\u50CF\u5217\u8868", "\u7EAF\u6587\u672C\u8282\u70B9\u4ECD\u7136\u8F6C\u4E49 markdown \u5143\u5B57\u7B26");
+  eq(serializeSubtree(rich[2]), "- ![\u7167\u7247](assets/pic.png)", "\u56FE\u7247\u8F6C\u6210 markdown \u8BED\u6CD5");
+  eq(
+    serializeSubtree(rich[3]),
+    '- <span data-type="strong">\u4E0A</span> <span data-type="em">\u4E0B</span>',
+    "\u5185\u5BB9\u91CC\u7684\u6362\u884C\u538B\u6210\u7A7A\u683C\uFF0C\u4E0D\u7834\u574F\u5217\u8868\u7ED3\u6784"
+  );
+  eq(
+    serializeSubtree(rich[4]),
+    '- <span data-type="text" style="color: var(--b3-font-color1)">\u7EA2\u5B57</span>',
+    "\u989C\u8272\u5185\u8054\u6837\u5F0F\u539F\u6837\u4FDD\u7559"
+  );
+  const nested = wrapRoot(
+    parseList(
+      el(
+        list("u", "LT", [
+          li(
+            "T1",
+            p("PT1", "\u7236 \u5B50", '<span data-type="strong">\u7236</span>'),
+            list("u", "LT2", [li("T2", p("PT2", "\u5B50", '<span data-type="em">\u5B50</span>'))])
+          )
+        ])
+      )
+    ),
+    "\u5BFC\u56FE"
+  );
+  const out = serializeSubtree(nested).split("\n");
+  eq(out.length, 2, "\u5B50\u6811\u4E00\u8D77\u5E8F\u5217\u5316");
+  eq(out[0], '- <span data-type="strong">\u7236</span>', "\u7236\u8282\u70B9\u4FDD\u683C\u5F0F");
+  eq(out[1], '  - <span data-type="em">\u5B50</span>', "\u5B50\u8282\u70B9\u4FDD\u683C\u5F0F\u4E14\u7F29\u8FDB");
+  eq(hasInlineFormat(rich[0]), true, "\u542B\u683C\u5F0F\u7684\u8282\u70B9\u5FC5\u987B\u56DE\u5230\u539F\u6587\u7F16\u8F91");
+  eq(hasInlineFormat(rich[2]), true, "\u7EAF\u56FE\u7247\u8282\u70B9\u4E5F\u5FC5\u987B\u56DE\u5230\u539F\u6587\u7F16\u8F91");
+  eq(hasInlineFormat(rich[1]), false, "\u7EAF\u6587\u672C\u8282\u70B9\u53EF\u4EE5\u5C31\u5730\u6539\u540D");
 }
 {
   eq(escapeMd("- \u770B\u8D77\u6765\u50CF\u5217\u8868"), "\\- \u770B\u8D77\u6765\u50CF\u5217\u8868", "\u884C\u9996\u77ED\u6A2A\u88AB\u8F6C\u4E49");
