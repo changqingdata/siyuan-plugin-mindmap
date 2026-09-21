@@ -151,7 +151,13 @@ export async function moveNodeTo(node: MMNode, target: MMNode, position: MMDropP
 
     if (position === "child") {
         if (target.subListId) return moveBlock({ id: node.id, parentID: target.subListId });
-        return relocateByCopy(node, { parentID: target.id });
+        // ⚠️ 这里不能给 `parentID: target.id`（列表项 id）——
+        // 内核会把新建的子列表插到**段落之前**，列表项的子块顺序变成
+        // [子列表, 段落]，大纲里子节点会跑到父节点文字上方。
+        // childAnchor 给的是「段落之后」，顺序才对（见文件头的实测记录）。
+        const place = childAnchor(target);
+        if (!place) return false;
+        return relocateByCopy(node, place);
     }
 
     // before：优先插到目标的前一个兄弟之后
@@ -181,4 +187,62 @@ export async function pasteNode(node: MMNode, markdown: string): Promise<boolean
     const place = childAnchor(node);
     if (!place) return false;
     return (await insertBlock({ data, ...place })) !== null;
+}
+
+/* ==================================================================== 批量 */
+
+/**
+ * 批量降级：把 `nodes` 依次移成 `anchor` 的子节点（追加到末尾）。
+ *
+ * 语义对齐常见大纲软件的「多行缩进」——选中 5 条，全部变成**上一条**的子节点，
+ * 而不是串成一条阶梯（一条条单独降级会串成 A→B→C 的链）。
+ *
+ * 返回失败的节点（空数组表示全部成功）。
+ *
+ * 两个分支的遍历方向**故意相反**，都是为了最终顺序正确：
+ *  - anchor 已有子列表 → 内核按 `parentID` **追加到末尾**，正序执行即为正序结果；
+ *  - anchor 还没有子列表 → 只能走「插副本 + 删原块」，而每一份副本都落在
+ *    anchor 段落的正后方，**倒序**执行才能得到正序结果。
+ */
+export async function indentNodesInto(nodes: MMNode[], anchor: MMNode): Promise<MMNode[]> {
+    const failed: MMNode[] = [];
+    if (nodes.length === 0 || !anchor.id) return nodes;
+
+    if (anchor.subListId) {
+        for (const n of nodes) {
+            if (!n.id || !(await moveBlock({ id: n.id, parentID: anchor.subListId }))) failed.push(n);
+        }
+        return failed;
+    }
+
+    const place = childAnchor(anchor);
+    if (!place) return nodes;
+    for (const n of [...nodes].reverse()) {
+        if (!(await relocateByCopy(n, place))) failed.push(n);
+    }
+    return failed;
+}
+
+/**
+ * 批量升级：把 `nodes` 依次移成「父节点的下一个兄弟」。
+ *
+ * 必须**倒序**执行：每条都插到父节点正后方，倒着来才能保持原有先后
+ * （正序会得到完全颠倒的顺序，实测 [A,B,C] 会变成 [C,B,A]）。
+ */
+export async function outdentNodes(nodes: MMNode[]): Promise<MMNode[]> {
+    const failed: MMNode[] = [];
+    for (const n of [...nodes].reverse()) {
+        const parent = n.parent;
+        if (!parent?.id || !n.id || !(await moveBlock({ id: n.id, previousID: parent.id }))) failed.push(n);
+    }
+    return failed;
+}
+
+/** 批量删除。删除顺序不影响结果（按块 ID 删，互不依赖），但倒序更贴近「从后往前删」的直觉 */
+export async function deleteNodes(nodes: MMNode[]): Promise<MMNode[]> {
+    const failed: MMNode[] = [];
+    for (const n of [...nodes].reverse()) {
+        if (!n.id || !(await deleteBlock(n.id))) failed.push(n);
+    }
+    return failed;
 }

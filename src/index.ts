@@ -27,6 +27,8 @@ const SHORTCUT_HELP = [
     "剪贴：Ctrl+C 复制子树 · Ctrl+V 粘贴为子节点 · Ctrl+X 剪切 · Ctrl+D 快速复制",
     "视图：Ctrl+= / Ctrl+- 缩放 · Ctrl+0 适应画布 · Ctrl+1 回到 100% · Ctrl+F 搜索 · F 全屏 · Esc 退出",
     "聚焦：Ctrl/⌘ + 双击节点（或右键菜单「聚焦此分支」）只看这一个分支，Esc 逐层返回",
+    "多选：Shift + 拖动框选 · Ctrl + 单击加选；选中 2 个以上会浮出批量操作条（升级 / 降级 / 折叠 / 导出 / 删除）",
+    "演示：工具条上的 ▶ 进入演示模式，→ / 空格 推进、← 回退、Esc 退出（不修改文档内容）",
 ].join("\n");
 
 /** 从块菜单点击到的元素反推出所属的列表块 */
@@ -361,16 +363,27 @@ export default class MindMapPlugin extends Plugin {
                 onEditInSource: (node) => this.scanner.editInSource(id, node),
                 onOpenBlock: (nodeId) => this.openBlockTab(nodeId),
                 onExit: () => this.closeSide(),
-                onLayoutChange: (layout) => this.persistLayout(id, layout),
+                // ⚠️ 并排面板**不写 `custom-mindmap`**（它是伴生视图，不该改变这个块的显示模式）。
+                // 所以这里不能挂 persistLayout —— 那会把列表变成导图模式，
+                // 于是行内视图也一起挂上来，屏幕上出现两份导图。
+                // 布局改到哪儿去了？走 onViewPrefs 存进文档级视图偏好。
+                onLayoutChange: () => undefined,
                 onFullscreen: () => undefined,
                 onRename: (node, text) => void this.scanner.applyRename(node, text, id),
-                onNodeAction: (kind, node, extra) => void this.scanner.applyAction(kind, node, extra, id),
+                onNodeAction: (kind, node, extra) => this.scanner.applyAction(kind, node, extra, id),
+                onBatchAction: (kind, nodes) => this.scanner.applyBatch(kind, nodes, id),
+                onViewPrefs: (prefs) => this.scanner.savePrefs(id, prefs),
                 onHistory: (redo) => this.scanner.undo(redo),
             },
             title,
             "side",
         );
         view.mount(body);
+        // 视图偏好是异步读的，挂载那一刻还拿不到；到了之后补一次渲染
+        void this.scanner.loadPrefs(id).then((prefs) => {
+            view.applyViewPrefs(prefs);
+            view.render(true);
+        });
         this.scanner.attachSide(id, view);
 
         this.sidePanel = panel;
@@ -448,13 +461,21 @@ export default class MindMapPlugin extends Plugin {
                 onLayoutChange: (layout) => this.persistLayout(listId, layout),
                 onFullscreen: () => undefined,
                 onRename: (node, text) => void this.scanner.applyRename(node, text, listId),
-                onNodeAction: (kind, node, extra) => void this.scanner.applyAction(kind, node, extra, listId),
+                onNodeAction: (kind, node, extra) => this.scanner.applyAction(kind, node, extra, listId),
+                onBatchAction: (kind, nodes) => this.scanner.applyBatch(kind, nodes, listId),
+                onViewPrefs: (prefs) => this.scanner.savePrefs(listId, prefs),
                 onHistory: (redo) => this.scanner.undo(redo),
             },
             title,
             "dialog",
         );
         view.mount(body);
+        // 全屏看的是同一个列表，视图偏好也共享：全屏里调好的布局 / 缩放
+        // 回到行内视图应当保持一致
+        void this.scanner.loadPrefs(listId).then((prefs) => {
+            view!.applyViewPrefs(prefs);
+            view!.render(true);
+        });
         // 交给扫描器一起照看：弹层视图不在 .protyle-wysiwyg 里，
         // 不登记的话结构操作后内核变了它也不会重渲染。
         this.scanner.attachFullscreen(listId, view);
@@ -558,6 +579,22 @@ export default class MindMapPlugin extends Plugin {
             });
         };
 
+        const addText = (title: string, description: string, value: string, changed: (v: string) => void) => {
+            setting.addItem({
+                title,
+                description,
+                createActionElement: () => {
+                    const input = document.createElement("input");
+                    input.type = "text";
+                    input.className = "b3-text-field fn__size200";
+                    input.value = value;
+                    input.placeholder = "例如 #4c8dff,#ff7a45,#52c41a";
+                    input.onchange = () => changed(input.value.trim());
+                    return input;
+                },
+            });
+        };
+
         addSelect("默认布局", "在块菜单中启用导图时使用的默认结构", LAYOUT_OPTIONS, this.config.layout, (v) => {
             this.config.layout = v as MMLayout;
         });
@@ -642,6 +679,33 @@ export default class MindMapPlugin extends Plugin {
         addToggle("小地图", "节点较多时在右下角显示缩略图，可点击跳转", this.config.minimap, (v) => {
             this.config.minimap = v;
         });
+
+        addToggle(
+            "视图偏好跟文档走",
+            "在这个列表里改过的布局 / 主题 / 连线会记进块属性（custom-mindmap-view），下次打开这个列表就恢复成你调好的样子；没改过的项继续跟随上面的全局默认。",
+            this.config.viewPerDoc,
+            (v) => {
+                this.config.viewPerDoc = v;
+            },
+        );
+
+        addToggle(
+            "悬停预览折叠节点",
+            "鼠标在折叠的节点上停一下，浮出一张卡片列出里面的前几个子节点。",
+            this.config.hoverPreview,
+            (v) => {
+                this.config.hoverPreview = v;
+            },
+        );
+
+        addText(
+            "自定义一级分支配色",
+            "逗号分隔的十六进制颜色，按顺序分配给一级分支，超出部分循环取用。留空表示用主题自带色板。",
+            this.config.customPalette,
+            (v) => {
+                this.config.customPalette = v;
+            },
+        );
 
         setting.addItem({
             title: "查看快捷键",

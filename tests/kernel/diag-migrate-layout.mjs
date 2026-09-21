@@ -14,6 +14,7 @@
  */
 import fs from "node:fs";
 import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const WORKSPACE = "D:\\常青Data";
 const NOTEBOOK = process.env.MM_NOTEBOOK || "20221230192740-wpnntiv";
@@ -115,7 +116,10 @@ try {
             `  旧属性残留=${JSON.stringify(attrs.data?.["custom-mindmap-fold"] ?? null)}  分支1 原生 fold=${JSON.stringify(st.data?.fold ?? null)}`,
         );
         results[mode] = { first, second };
-        await api("/api/block/deleteBlock", { id: docId });
+        // ⚠️ 这里原来是 `/api/block/deleteBlock` —— 它**删不掉文档**：
+        // 只清块，`.sy` 文件留在磁盘上、文档也还挂在文件树里，
+        // 每跑一轮就多两个「临时-迁移布局-xxx」。改走真正的删文档接口。
+        await removeDoc(api, docId);
     }
 
     console.log("\n===== 结论 =====");

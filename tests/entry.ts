@@ -9,6 +9,7 @@ import { parseList, decorate, wrapRoot, flatten } from "../src/core/parser";
 import { layout } from "../src/core/layout";
 import { buildConnectors } from "../src/core/edge";
 import { mixHex } from "../src/core/theme";
+import { decodeViewPrefs, encodeViewPrefs } from "../src/core/prefs";
 import {
     canDelete,
     canEdit,
@@ -23,6 +24,7 @@ import {
     markerOf,
     newItemMarkdown,
     serializeSubtree,
+    topLevelOf,
 } from "../src/core/tree";
 import type { MMNode } from "../src/types";
 
@@ -577,8 +579,128 @@ console.log("[7] 连线配色（实色混合）");
     ok(mixHex("#4c8dff", [11, 13, 18], 0.9).startsWith("rgb("), "混出的颜色不透明，重叠段不会叠深");
 }
 
-/* ------------------------------------------------------------------ 汇总 */
+/* ------------------------------------------------- 8. 连线语义化（虚线 / 下标） */
 
+console.log("[8] 连线语义化（虚线 / 子节点下标）");
+{
+    const parent = { x: 0, y: 0, w: 80, h: 40, dir: 1 as const };
+    const kids = [
+        { x: 200, y: 0, w: 60, h: 30, dir: 1 as const },
+        { x: 200, y: 60, w: 60, h: 30, dir: 1 as const },
+    ];
+    const cons = buildConnectors({
+        parent,
+        kids,
+        mode: "logic",
+        style: "elbow",
+        gap: 58,
+        base: 2.8,
+        kidDash: [undefined, "5 4"],
+    });
+    const stubs = cons.filter((c) => c.kind === "stub");
+    eq(stubs[0].dash, undefined, "普通支线是实线");
+    eq(stubs[1].dash, "5 4", "已完成任务的支线是虚线");
+    eq(cons.find((c) => c.kind === "trunk")!.dash, undefined, "主干始终实线（同级共享，按子节点区分不了）");
+    eq(cons.find((c) => c.kind === "spine")!.dash, undefined, "脊也始终实线");
+
+    /*
+     * 思维导图模式下根节点两侧的子节点会被分成两组分别生成连线。
+     * 分组下标一旦漏出去，调用方拿它反查 `n.kids[i]` 就会取到另一侧的节点 ——
+     * 支线颜色会互相串。所以 childIndex 必须是 kids 数组里的**原始下标**。
+     */
+    const mixed = buildConnectors({
+        parent,
+        kids: [
+            { x: -200, y: 0, w: 60, h: 30, dir: -1 as const },
+            { x: 200, y: 0, w: 60, h: 30, dir: 1 as const },
+            { x: -200, y: 80, w: 60, h: 30, dir: -1 as const },
+        ],
+        mode: "mind",
+        style: "elbow",
+        gap: 58,
+        base: 2.8,
+    });
+    const idx = mixed
+        .filter((c) => c.kind === "stub")
+        .map((c) => c.childIndex)
+        .sort();
+    eq(JSON.stringify(idx), "[0,1,2]", "左右分组后子节点下标仍是原始下标");
+
+    // 虚线也要按原始下标取 —— 分组之后不能错位到另一侧的节点上
+    const dashed = buildConnectors({
+        parent,
+        kids: [
+            { x: -200, y: 0, w: 60, h: 30, dir: -1 as const },
+            { x: 200, y: 0, w: 60, h: 30, dir: 1 as const },
+        ],
+        mode: "mind",
+        style: "elbow",
+        gap: 58,
+        base: 2.8,
+        kidDash: ["5 4", undefined],
+    });
+    const dashByIdx = new Map(dashed.filter((c) => c.kind === "stub").map((c) => [c.childIndex, c.dash]));
+    eq(dashByIdx.get(0), "5 4", "左侧（原始下标 0）的支线取到虚线");
+    eq(dashByIdx.get(1), undefined, "右侧（原始下标 1）的支线仍是实线");
+}
+
+/* ---------------------------------------------------- 9. 视图偏好编解码（P0-3） */
+
+console.log("[9] 视图偏好编解码");
+{
+    eq(encodeViewPrefs({}), "", "空偏好编码为空串");
+    eq(encodeViewPrefs({ layout: "logic" }), "layout=logic", "只编码用户改过的项");
+    const full = encodeViewPrefs({ layout: "mind", theme: "deep", edge: "elbow", scale: 1.25 });
+    eq(full, "layout=mind;theme=deep;edge=elbow;scale=1.2500", "四项一起编码");
+
+    const back = decodeViewPrefs(full);
+    eq(back.layout, "mind", "解出布局");
+    eq(back.theme, "deep", "解出主题");
+    eq(back.edge, "elbow", "解出连线");
+    eq(back.scale, 1.25, "解出缩放");
+
+    // 往返一致：读出来再写回去必须得到同一个串，否则每次开关文档都会「变一次」
+    eq(encodeViewPrefs(decodeViewPrefs(full)), full, "编解码往返一致");
+
+    eq(JSON.stringify(decodeViewPrefs(null)), "{}", "空属性解出空偏好");
+    eq(JSON.stringify(decodeViewPrefs("")), "{}", "空串解出空偏好");
+    eq(decodeViewPrefs("垃圾数据").layout, undefined, "无法解析的内容被忽略");
+    eq(decodeViewPrefs("layout=不存在的布局").layout, undefined, "非法布局被忽略");
+    eq(decodeViewPrefs("edge=不存在的连线").edge, undefined, "非法连线被忽略");
+    // 主题不做白名单：主题列表会增长，老代码不该把新主题判成非法值
+    eq(decodeViewPrefs("theme=未来的新主题").theme, "未来的新主题", "主题名不做白名单校验");
+
+    // 缩放必须夹进安全区间 —— 一个手改过的属性值不该把画布缩没
+    eq(decodeViewPrefs("scale=0.0001").scale, 0.15, "过小的缩放被夹到下限");
+    eq(decodeViewPrefs("scale=999").scale, 6, "过大的缩放被夹到上限");
+    eq(decodeViewPrefs("scale=abc").scale, undefined, "非数字缩放被忽略");
+    eq(decodeViewPrefs("scale=0").scale, undefined, "0 缩放被忽略（会让画布整个消失）");
+
+    // 坏掉一段不能连累其它段
+    const mixed = decodeViewPrefs("layout=tree;theme=;edge=straight;scale=1");
+    eq(mixed.layout, "tree", "空值段之前的项仍然解出");
+    eq(mixed.theme, undefined, "空值段被跳过");
+    eq(mixed.edge, "straight", "空值段之后的项仍然解出");
+    eq(mixed.scale, 1, "整数缩放也能解出");
+}
+
+/* ------------------------------------------------------ 10. 批量操作的输入整理 */
+
+console.log("[10] 批量操作（选中项整理）");
+{
+    const r = wrapRoot(parseList(domTree), "导图");
+    decorate(r, PALETTE, true);
+
+    const a = r.children[0];
+    const b = a.children[0];
+    eq(topLevelOf([a, b]).length, 1, "祖先也被选中时只保留最外层");
+    ok(topLevelOf([a, b])[0] === a, "保留的是祖先那一项");
+    eq(topLevelOf([r.children[0], r.children[1]]).length, 2, "互不包含的选中项都保留");
+    eq(topLevelOf([]).length, 0, "空选择返回空");
+    eq(topLevelOf([b]).length, 1, "只选了子节点时原样保留");
+}
+
+/* ------------------------------------------------------------------ 汇总 */
 console.log("");
 if (failures.length === 0) {
     console.log(`全部通过 ✓  共 ${passed} 项断言`);

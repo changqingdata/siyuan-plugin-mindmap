@@ -13,6 +13,7 @@
  */
 import fs from "node:fs";
 import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -21,7 +22,6 @@ const NOTEBOOK = process.env.MM_NOTEBOOK || "20221230192740-wpnntiv";
 const conf = JSON.parse(fs.readFileSync(`${WORKSPACE}/conf/conf.json`, "utf8"));
 const TOKEN = process.env.SIYUAN_TOKEN || conf.api?.token || "";
 
-const DOC = process.argv[2] || "20260920120514-magd66i";
 const OUT = "tests/.build";
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -43,6 +43,46 @@ const other = await api("/api/filetree/createDocWithMd", {
 const otherId = other.data;
 
 /**
+ * 目标文档：命令行给了就用给的，没给就**现造一个**。
+ *
+ * ⚠️ 这里以前写死了一个文档 ID —— 而那个文档是上一轮某个探针漏下来的临时文档。
+ * 清理掉那些垃圾之后，这支探针就再也跑不起来了（`ux:all` 直接挂在「等待超时: 首次打开」）。
+ * 探针不该依赖「工作空间里恰好存在某个文档」这种巧合，所以改成自给自足。
+ *
+ * 对照文档的形态照着用户那份来：9 个分支 × 6 个条目，分支标题够长会换行 ——
+ * 错位那类问题只有在这个体量上才暴露得出来。
+ */
+function fixtureMd() {
+    const md = ["- 错位复现 · 大纲导图"];
+    for (let i = 1; i <= 9; i++) {
+        md.push(`  - 分支 ${i} · 一个有点长的主题标题文字`);
+        for (let j = 1; j <= 6; j++) md.push(`    - 条目 ${i}.${j}：用来观察排版、连线与层级的说明文字`);
+    }
+    md.push("");
+    return md.join("\n");
+}
+
+let DOC = process.argv[2] || "";
+let LIST = process.argv[3] || "";
+let fixtureId = "";
+if (!DOC) {
+    const res = await api("/api/filetree/createDocWithMd", {
+        notebook: NOTEBOOK,
+        path: `/临时-错位复现-${Date.now()}`,
+        markdown: fixtureMd(),
+    });
+    if (res.code !== 0) throw new Error("建对照文档失败: " + JSON.stringify(res));
+    fixtureId = res.data;
+    DOC = fixtureId;
+    const kids = (await api("/api/block/getChildBlocks", { id: DOC })).data ?? [];
+    LIST = kids.find((k) => k.type === "l")?.id ?? "";
+    if (!LIST) throw new Error("对照文档里没找到列表块");
+    // 不标记的话打开文档不会自动挂导图视图
+    await api("/api/attr/setBlockAttrs", { id: LIST, attrs: { "custom-mindmap": "logic" } });
+    console.log(`（没指定文档，已现造对照文档 ${DOC} · 列表 ${LIST}）`);
+}
+
+/**
  * 备份目标列表的折叠状态。
  *
  * ⚠️ 探针会点「折叠/展开」珠子，而插件现在把折叠**直接写到思源原生的 `fold` 上**
@@ -51,8 +91,6 @@ const otherId = other.data;
  * 备份的是「哪些列表项是折着的」，用块 ID 记录，所以还原走内核 API，
  * 与浏览器是否还开着无关。
  */
-const LIST = process.argv[3] || "20260920120514-0h9p879";
-
 const SNAP_FOLD = `(() => {
     const list = document.querySelector('.list[data-node-id="${LIST}"]');
     if (!list) return null;
@@ -279,6 +317,10 @@ try {
         id: LIST,
         attrs: { "custom-mindmap-fold": savedLegacy },
     }).catch(() => {});
-    await api("/api/block/deleteBlock", { id: otherId }).catch(() => {});
+    await removeDoc(api, otherId);
     console.log("已清理切换用文档");
+    if (fixtureId) {
+        await removeDoc(api, fixtureId);
+        console.log("已清理对照文档");
+    }
 }

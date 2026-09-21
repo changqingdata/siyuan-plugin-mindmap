@@ -177,6 +177,11 @@ export const THEME_LIST: Array<{ id: MMThemeId; name: string }> = [
 
 /** 解析主题：把 id 变成一组具体的 CSS 变量值 */
 export function resolveTheme(id: MMThemeId, dark = isDarkMode()): MMTheme {
+    // 未知 id 一律退回「跟随思源」。
+    // 主题 id 会被写进文档级视图偏好（`custom-mindmap-view`），
+    // 于是它可能来自旧版本、来自别的机器、或者用户手改过的属性值 ——
+    // 直接 `THEMES[id]` 会拿到 undefined，下面 `{...t}` 就炸了。
+    if (id !== "siyuan" && !THEMES[id]) id = "siyuan";
     if (id === "siyuan") {
         return {
             id: "siyuan",

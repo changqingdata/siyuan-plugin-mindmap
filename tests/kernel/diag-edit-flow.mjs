@@ -15,6 +15,7 @@
  */
 import fs from "node:fs";
 import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -261,6 +262,6 @@ try {
     console.log(`\n${pass}/${results.length} 项通过`);
 } finally {
     await chrome.close();
-    await api("/api/block/deleteBlock", { id: docId }).catch(() => {});
+    await removeDoc(api, docId);
     console.log("已清理临时文档");
 }

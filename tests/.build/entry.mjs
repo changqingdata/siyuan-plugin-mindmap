@@ -411,21 +411,28 @@ var MAX_TRUNK = 42;
 var MAX_RADIUS = 9;
 var r = (n) => Math.round(n * 100) / 100;
 function buildConnectors(input) {
-  const { parent, kids, mode, style, gap, base } = input;
+  const { parent, kids, mode, style, gap, base, kidDash } = input;
   if (kids.length === 0) return [];
   const trunk = Math.max(MIN_TRUNK, Math.min(gap * 0.44, MAX_TRUNK));
   const spineW = Math.max(1, base * 0.75);
   const stubW = Math.max(1, base * 0.5);
   const radius = Math.max(3, Math.min(trunk * 0.5, MAX_RADIUS));
-  return mode === "tree" ? vertical(parent, kids, style, trunk, base, spineW, stubW, radius) : horizontal(parent, kids, style, trunk, base, spineW, stubW, radius);
+  return mode === "tree" ? vertical(parent, kids, style, trunk, base, spineW, stubW, radius, kidDash) : horizontal(parent, kids, style, trunk, base, spineW, stubW, radius, kidDash);
 }
-function vertical(parent, kids, style, trunk, base, spineW, stubW, radius) {
+function vertical(parent, kids, style, trunk, base, spineW, stubW, radius, kidDash) {
   const px = parent.x + parent.w / 2;
   const py = parent.y + parent.h;
   const out = [];
+  const dashAt = (i) => kidDash?.[i] ? { dash: kidDash[i] } : {};
   if (style === "straight") {
     kids.forEach((k, i) => {
-      out.push({ d: `M${r(px)},${r(py)} L${r(k.x + k.w / 2)},${r(k.y)}`, width: stubW, kind: "stub", childIndex: i });
+      out.push({
+        d: `M${r(px)},${r(py)} L${r(k.x + k.w / 2)},${r(k.y)}`,
+        width: stubW,
+        kind: "stub",
+        childIndex: i,
+        ...dashAt(i)
+      });
     });
     return out;
   }
@@ -443,44 +450,52 @@ function vertical(parent, kids, style, trunk, base, spineW, stubW, radius) {
     const ky = k.y;
     const dx = Math.sign(kx - px);
     if (style === "elbow" || dx === 0 || Math.abs(kx - px) < radius * 1.2) {
-      out.push({ d: `M${r(kx)},${r(sy)} L${r(kx)},${r(ky)}`, width: stubW, kind: "stub", childIndex: i });
+      out.push({
+        d: `M${r(kx)},${r(sy)} L${r(kx)},${r(ky)}`,
+        width: stubW,
+        kind: "stub",
+        childIndex: i,
+        ...dashAt(i)
+      });
     } else {
       const x0 = kx - dx * radius;
       out.push({
         d: `M${r(x0)},${r(sy)} Q${r(kx)},${r(sy)} ${r(kx)},${r(sy + radius)} L${r(kx)},${r(ky)}`,
         width: stubW,
         kind: "stub",
-        childIndex: i
+        childIndex: i,
+        ...dashAt(i)
       });
     }
   });
   return out;
 }
-function horizontal(parent, kids, style, trunk, base, spineW, stubW, radius) {
+function horizontal(parent, kids, style, trunk, base, spineW, stubW, radius, kidDash) {
   const out = [];
   const groups = /* @__PURE__ */ new Map();
-  for (const k of kids) {
+  kids.forEach((k, i) => {
     const list2 = groups.get(k.dir);
-    if (list2) list2.push(k);
-    else groups.set(k.dir, [k]);
-  }
+    if (list2) list2.push({ k, i });
+    else groups.set(k.dir, [{ k, i }]);
+  });
   for (const [dir, group] of groups) {
     const px = dir === 1 ? parent.x + parent.w : parent.x;
     const py = parent.y + parent.h / 2;
     if (style === "straight") {
-      group.forEach((k, i) => {
+      for (const { k, i } of group) {
         const kx = dir === 1 ? k.x : k.x + k.w;
         out.push({
           d: `M${r(px)},${r(py)} L${r(kx)},${r(k.y + k.h / 2)}`,
           width: stubW,
           kind: "stub",
-          childIndex: i
+          childIndex: i,
+          ...kidDash?.[i] ? { dash: kidDash[i] } : {}
         });
-      });
+      }
       continue;
     }
     const sx = px + dir * trunk;
-    const cys = group.map((k) => k.y + k.h / 2);
+    const cys = group.map(({ k }) => k.y + k.h / 2);
     out.push({ d: `M${r(px)},${r(py)} L${r(sx)},${r(py)}`, width: base, kind: "trunk", childIndex: null });
     out.push({
       d: `M${r(sx)},${r(Math.min(py, ...cys))} L${r(sx)},${r(Math.max(py, ...cys))}`,
@@ -488,22 +503,30 @@ function horizontal(parent, kids, style, trunk, base, spineW, stubW, radius) {
       kind: "spine",
       childIndex: null
     });
-    group.forEach((k, i) => {
+    for (const { k, i } of group) {
       const kx = dir === 1 ? k.x : k.x + k.w;
       const ky = k.y + k.h / 2;
       const dy = Math.sign(ky - py);
+      const dash = kidDash?.[i] ? { dash: kidDash[i] } : {};
       if (style === "elbow" || dy === 0 || Math.abs(ky - py) < radius * 1.2) {
-        out.push({ d: `M${r(sx)},${r(ky)} L${r(kx)},${r(ky)}`, width: stubW, kind: "stub", childIndex: i });
+        out.push({
+          d: `M${r(sx)},${r(ky)} L${r(kx)},${r(ky)}`,
+          width: stubW,
+          kind: "stub",
+          childIndex: i,
+          ...dash
+        });
       } else {
         const y0 = ky - dy * radius;
         out.push({
           d: `M${r(sx)},${r(y0)} Q${r(sx)},${r(ky)} ${r(sx + dir * radius)},${r(ky)} L${r(kx)},${r(ky)}`,
           width: stubW,
           kind: "stub",
-          childIndex: i
+          childIndex: i,
+          ...dash
         });
       }
-    });
+    }
   }
   return out;
 }
@@ -517,6 +540,42 @@ function mixHex(hex, bg, alpha) {
   const g2 = Math.round((n >> 8 & 255) * a + bg[1] * (1 - a));
   const b = Math.round((n & 255) * a + bg[2] * (1 - a));
   return `rgb(${r2},${g2},${b})`;
+}
+
+// src/core/prefs.ts
+var LAYOUTS = ["logic", "mind", "tree"];
+var EDGES = ["curve", "elbow", "straight"];
+var MIN_SCALE = 0.15;
+var MAX_SCALE = 6;
+function encodeViewPrefs(p2) {
+  const parts = [];
+  if (p2.layout) parts.push(`layout=${p2.layout}`);
+  if (p2.theme) parts.push(`theme=${p2.theme}`);
+  if (p2.edge) parts.push(`edge=${p2.edge}`);
+  if (p2.scale !== void 0 && Number.isFinite(p2.scale)) parts.push(`scale=${p2.scale.toFixed(4)}`);
+  return parts.join(";");
+}
+function decodeViewPrefs(raw) {
+  const out = {};
+  if (!raw) return out;
+  for (const seg of raw.split(";")) {
+    const i = seg.indexOf("=");
+    if (i <= 0) continue;
+    const key = seg.slice(0, i).trim();
+    const val = seg.slice(i + 1).trim();
+    if (!val) continue;
+    if (key === "layout" && LAYOUTS.includes(val)) {
+      out.layout = val;
+    } else if (key === "theme") {
+      out.theme = val;
+    } else if (key === "edge" && EDGES.includes(val)) {
+      out.edge = val;
+    } else if (key === "scale") {
+      const n = Number.parseFloat(val);
+      if (Number.isFinite(n) && n > 0) out.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, n));
+    }
+  }
+  return out;
 }
 
 // src/core/tree.ts
@@ -588,6 +647,17 @@ function canDelete(node) {
 }
 function canEdit(node) {
   return !!node.contentId;
+}
+function topLevelOf(nodes) {
+  const set = new Set(nodes);
+  return nodes.filter((n) => {
+    let p2 = n.parent;
+    while (p2) {
+      if (set.has(p2)) return false;
+      p2 = p2.parent;
+    }
+    return true;
+  });
 }
 
 // tests/entry.ts
@@ -996,6 +1066,97 @@ console.log("[7] \u8FDE\u7EBF\u914D\u8272\uFF08\u5B9E\u8272\u6DF7\u5408\uFF09");
   eq(mixHex("#000000", [255, 255, 255], 0.5), "rgb(128,128,128)", "\u534A\u900F\u660E\u6DF7\u8272\u53D6\u4E2D\u95F4\u503C");
   eq(mixHex("\u4E0D\u662F\u989C\u8272", [0, 0, 0], 1), "\u4E0D\u662F\u989C\u8272", "\u975E\u5341\u516D\u8FDB\u5236\u8F93\u5165\u539F\u6837\u8FD4\u56DE");
   ok(mixHex("#4c8dff", [11, 13, 18], 0.9).startsWith("rgb("), "\u6DF7\u51FA\u7684\u989C\u8272\u4E0D\u900F\u660E\uFF0C\u91CD\u53E0\u6BB5\u4E0D\u4F1A\u53E0\u6DF1");
+}
+console.log("[8] \u8FDE\u7EBF\u8BED\u4E49\u5316\uFF08\u865A\u7EBF / \u5B50\u8282\u70B9\u4E0B\u6807\uFF09");
+{
+  const parent = { x: 0, y: 0, w: 80, h: 40, dir: 1 };
+  const kids = [
+    { x: 200, y: 0, w: 60, h: 30, dir: 1 },
+    { x: 200, y: 60, w: 60, h: 30, dir: 1 }
+  ];
+  const cons = buildConnectors({
+    parent,
+    kids,
+    mode: "logic",
+    style: "elbow",
+    gap: 58,
+    base: 2.8,
+    kidDash: [void 0, "5 4"]
+  });
+  const stubs = cons.filter((c) => c.kind === "stub");
+  eq(stubs[0].dash, void 0, "\u666E\u901A\u652F\u7EBF\u662F\u5B9E\u7EBF");
+  eq(stubs[1].dash, "5 4", "\u5DF2\u5B8C\u6210\u4EFB\u52A1\u7684\u652F\u7EBF\u662F\u865A\u7EBF");
+  eq(cons.find((c) => c.kind === "trunk").dash, void 0, "\u4E3B\u5E72\u59CB\u7EC8\u5B9E\u7EBF\uFF08\u540C\u7EA7\u5171\u4EAB\uFF0C\u6309\u5B50\u8282\u70B9\u533A\u5206\u4E0D\u4E86\uFF09");
+  eq(cons.find((c) => c.kind === "spine").dash, void 0, "\u810A\u4E5F\u59CB\u7EC8\u5B9E\u7EBF");
+  const mixed = buildConnectors({
+    parent,
+    kids: [
+      { x: -200, y: 0, w: 60, h: 30, dir: -1 },
+      { x: 200, y: 0, w: 60, h: 30, dir: 1 },
+      { x: -200, y: 80, w: 60, h: 30, dir: -1 }
+    ],
+    mode: "mind",
+    style: "elbow",
+    gap: 58,
+    base: 2.8
+  });
+  const idx = mixed.filter((c) => c.kind === "stub").map((c) => c.childIndex).sort();
+  eq(JSON.stringify(idx), "[0,1,2]", "\u5DE6\u53F3\u5206\u7EC4\u540E\u5B50\u8282\u70B9\u4E0B\u6807\u4ECD\u662F\u539F\u59CB\u4E0B\u6807");
+  const dashed = buildConnectors({
+    parent,
+    kids: [
+      { x: -200, y: 0, w: 60, h: 30, dir: -1 },
+      { x: 200, y: 0, w: 60, h: 30, dir: 1 }
+    ],
+    mode: "mind",
+    style: "elbow",
+    gap: 58,
+    base: 2.8,
+    kidDash: ["5 4", void 0]
+  });
+  const dashByIdx = new Map(dashed.filter((c) => c.kind === "stub").map((c) => [c.childIndex, c.dash]));
+  eq(dashByIdx.get(0), "5 4", "\u5DE6\u4FA7\uFF08\u539F\u59CB\u4E0B\u6807 0\uFF09\u7684\u652F\u7EBF\u53D6\u5230\u865A\u7EBF");
+  eq(dashByIdx.get(1), void 0, "\u53F3\u4FA7\uFF08\u539F\u59CB\u4E0B\u6807 1\uFF09\u7684\u652F\u7EBF\u4ECD\u662F\u5B9E\u7EBF");
+}
+console.log("[9] \u89C6\u56FE\u504F\u597D\u7F16\u89E3\u7801");
+{
+  eq(encodeViewPrefs({}), "", "\u7A7A\u504F\u597D\u7F16\u7801\u4E3A\u7A7A\u4E32");
+  eq(encodeViewPrefs({ layout: "logic" }), "layout=logic", "\u53EA\u7F16\u7801\u7528\u6237\u6539\u8FC7\u7684\u9879");
+  const full = encodeViewPrefs({ layout: "mind", theme: "deep", edge: "elbow", scale: 1.25 });
+  eq(full, "layout=mind;theme=deep;edge=elbow;scale=1.2500", "\u56DB\u9879\u4E00\u8D77\u7F16\u7801");
+  const back = decodeViewPrefs(full);
+  eq(back.layout, "mind", "\u89E3\u51FA\u5E03\u5C40");
+  eq(back.theme, "deep", "\u89E3\u51FA\u4E3B\u9898");
+  eq(back.edge, "elbow", "\u89E3\u51FA\u8FDE\u7EBF");
+  eq(back.scale, 1.25, "\u89E3\u51FA\u7F29\u653E");
+  eq(encodeViewPrefs(decodeViewPrefs(full)), full, "\u7F16\u89E3\u7801\u5F80\u8FD4\u4E00\u81F4");
+  eq(JSON.stringify(decodeViewPrefs(null)), "{}", "\u7A7A\u5C5E\u6027\u89E3\u51FA\u7A7A\u504F\u597D");
+  eq(JSON.stringify(decodeViewPrefs("")), "{}", "\u7A7A\u4E32\u89E3\u51FA\u7A7A\u504F\u597D");
+  eq(decodeViewPrefs("\u5783\u573E\u6570\u636E").layout, void 0, "\u65E0\u6CD5\u89E3\u6790\u7684\u5185\u5BB9\u88AB\u5FFD\u7565");
+  eq(decodeViewPrefs("layout=\u4E0D\u5B58\u5728\u7684\u5E03\u5C40").layout, void 0, "\u975E\u6CD5\u5E03\u5C40\u88AB\u5FFD\u7565");
+  eq(decodeViewPrefs("edge=\u4E0D\u5B58\u5728\u7684\u8FDE\u7EBF").edge, void 0, "\u975E\u6CD5\u8FDE\u7EBF\u88AB\u5FFD\u7565");
+  eq(decodeViewPrefs("theme=\u672A\u6765\u7684\u65B0\u4E3B\u9898").theme, "\u672A\u6765\u7684\u65B0\u4E3B\u9898", "\u4E3B\u9898\u540D\u4E0D\u505A\u767D\u540D\u5355\u6821\u9A8C");
+  eq(decodeViewPrefs("scale=0.0001").scale, 0.15, "\u8FC7\u5C0F\u7684\u7F29\u653E\u88AB\u5939\u5230\u4E0B\u9650");
+  eq(decodeViewPrefs("scale=999").scale, 6, "\u8FC7\u5927\u7684\u7F29\u653E\u88AB\u5939\u5230\u4E0A\u9650");
+  eq(decodeViewPrefs("scale=abc").scale, void 0, "\u975E\u6570\u5B57\u7F29\u653E\u88AB\u5FFD\u7565");
+  eq(decodeViewPrefs("scale=0").scale, void 0, "0 \u7F29\u653E\u88AB\u5FFD\u7565\uFF08\u4F1A\u8BA9\u753B\u5E03\u6574\u4E2A\u6D88\u5931\uFF09");
+  const mixed = decodeViewPrefs("layout=tree;theme=;edge=straight;scale=1");
+  eq(mixed.layout, "tree", "\u7A7A\u503C\u6BB5\u4E4B\u524D\u7684\u9879\u4ECD\u7136\u89E3\u51FA");
+  eq(mixed.theme, void 0, "\u7A7A\u503C\u6BB5\u88AB\u8DF3\u8FC7");
+  eq(mixed.edge, "straight", "\u7A7A\u503C\u6BB5\u4E4B\u540E\u7684\u9879\u4ECD\u7136\u89E3\u51FA");
+  eq(mixed.scale, 1, "\u6574\u6570\u7F29\u653E\u4E5F\u80FD\u89E3\u51FA");
+}
+console.log("[10] \u6279\u91CF\u64CD\u4F5C\uFF08\u9009\u4E2D\u9879\u6574\u7406\uFF09");
+{
+  const r2 = wrapRoot(parseList(domTree), "\u5BFC\u56FE");
+  decorate(r2, PALETTE, true);
+  const a = r2.children[0];
+  const b = a.children[0];
+  eq(topLevelOf([a, b]).length, 1, "\u7956\u5148\u4E5F\u88AB\u9009\u4E2D\u65F6\u53EA\u4FDD\u7559\u6700\u5916\u5C42");
+  ok(topLevelOf([a, b])[0] === a, "\u4FDD\u7559\u7684\u662F\u7956\u5148\u90A3\u4E00\u9879");
+  eq(topLevelOf([r2.children[0], r2.children[1]]).length, 2, "\u4E92\u4E0D\u5305\u542B\u7684\u9009\u4E2D\u9879\u90FD\u4FDD\u7559");
+  eq(topLevelOf([]).length, 0, "\u7A7A\u9009\u62E9\u8FD4\u56DE\u7A7A");
+  eq(topLevelOf([b]).length, 1, "\u53EA\u9009\u4E86\u5B50\u8282\u70B9\u65F6\u539F\u6837\u4FDD\u7559");
 }
 console.log("");
 if (failures.length === 0) {

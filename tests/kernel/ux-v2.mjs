@@ -18,6 +18,7 @@
  */
 import fs from "node:fs";
 import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -353,12 +354,30 @@ try {
 
     const target = await page.eval(nodeCenter(1));
     if (target) {
-        // Ctrl + 双击：两次 press/release，clickCount 递增，浏览器才会派发 dblclick
+        // Ctrl + 双击：两次 press/release，clickCount 递增，浏览器才会派发 dblclick。
+        //
+        // ⚠️ 两下之间**不能有任何东西推动画布**。Ctrl+单击在导图里是 toggleMulti
+        // （多选），多选会让批量操作条冒出来 —— 那条子早先是流内元素，一出现就把
+        // 画布往下推 ~40px，于是第二下打到了空白上（双击空白 = 适应画布，
+        // 画面还会动一下，看起来像「下钻坏了」）。修法是让批量条改成浮层。
+        // 这里仍然保留落点自检：真出了这种事，日志要能一眼指出来。
         await page.mouse("mouseMoved", target.x, target.y, { buttons: 0 });
-        for (const n of [1, 2]) {
-            await page.mouse("mousePressed", target.x, target.y, { clickCount: n, modifiers: 2 });
-            await page.mouse("mouseReleased", target.x, target.y, { clickCount: n, modifiers: 2 });
+        // 第一下
+        await page.mouse("mousePressed", target.x, target.y, { clickCount: 1, modifiers: 2 });
+        await page.mouse("mouseReleased", target.x, target.y, { clickCount: 1, modifiers: 2 });
+        // 落点自检就插在两下之间 —— 这才是风险点：第一下如果推动了画布，
+        // 第二下就打到空白上（双击空白 = 适应画布，画面还会再动一下）。
+        // 放在两下之后检查是没用的：那时下钻已经完成，整张图都换了。
+        const landed = await page.eval(`(() => {
+            const el = document.elementFromPoint(${target.x}, ${target.y});
+            return el ? String(el.className || el.tagName).slice(0, 40) : '(null)';
+        })()`);
+        if (!/mm-(node|inner|txt)/.test(landed)) {
+            console.log(`  ⚠️ 第二下会打在「${landed}」而不是节点上 —— 第一下把画布推动了`);
         }
+        // 第二下
+        await page.mouse("mousePressed", target.x, target.y, { clickCount: 2, modifiers: 2 });
+        await page.mouse("mouseReleased", target.x, target.y, { clickCount: 2, modifiers: 2 });
         await sleep(900);
         const drilled = await page.eval(METRICS);
         console.log("下钻后:", JSON.stringify(drilled));
@@ -549,7 +568,7 @@ try {
     await chrome.close();
     const info = await api("/api/block/getBlockInfo", { id: docId });
     if (info.code === 0) {
-        await api("/api/filetree/removeDoc", { notebook: info.data.box, path: info.data.path });
+        await removeDoc(api, info.data.id ?? docId);
         console.log("已清理临时文档");
     }
 }

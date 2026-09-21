@@ -140,3 +140,25 @@ export function canDelete(node: MMNode): boolean {
 export function canEdit(node: MMNode): boolean {
     return !!node.contentId;
 }
+
+/**
+ * 批量操作里「祖先也被选中」的节点要去掉，只留最外层。
+ *
+ * 把 A 和 A 的子节点 B 一起「升级」是自相矛盾的 —— 执行顺序不同会得到
+ * 完全不同的树，而且中途 B 可能已经跟着 A 一起被移走了，第二条操作必然失败、
+ * 触发整体回滚。结构操作本来就只该作用在最外层的选中项上。
+ *
+ * 放在 tree.ts 而不是 actions.ts：它是纯树逻辑，不碰内核，
+ * 这样也能直接在 Node 单测里覆盖（actions.ts 依赖 siyuan 运行时）。
+ */
+export function topLevelOf(nodes: MMNode[]): MMNode[] {
+    const set = new Set(nodes);
+    return nodes.filter((n) => {
+        let p = n.parent;
+        while (p) {
+            if (set.has(p)) return false;
+            p = p.parent;
+        }
+        return true;
+    });
+}

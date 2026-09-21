@@ -31,6 +31,7 @@
  */
 import fs from "node:fs";
 import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -103,7 +104,10 @@ const ok = (cond, label, extra = "") => {
 const VIS = `(() => {
     const root = document.querySelector('.mm-root:not(.mm-root--dialog):not(.mm-root--side)');
     if (!root) return { err: 'no root' };
-    const els = [...root.querySelectorAll('.mm-node')];
+    // 收拢动画期间，那些「已经不在树上、但还在飞」的节点仍然挂在 .mm-world 里，
+    // 也仍然是 visibility: visible。它们不是布局的一部分，得排除掉 ——
+    // 否则「折了没有」会被动画尾巴拖住 200ms 才看得出来（探针会误报「没折」）。
+    const els = [...root.querySelectorAll('.mm-node')].filter((e) => !e.classList.contains('mm-collapsing'));
     const vis = els.filter((e) => e.style.visibility !== 'hidden');
     const txt = (e) => ((e.querySelector('.mm-txt') || {}).textContent || '').replace(/[\\u200B-\\u200D\\u2060\\uFEFF]/g, '').trim();
     return {
@@ -270,7 +274,7 @@ try {
     if (fail === 0) console.log("✓ 折叠状态双向同步成立，且持久化由思源原生保证");
 } finally {
     await chrome.close();
-    await api("/api/block/deleteBlock", { id: docId }).catch(() => {});
+    await removeDoc(api, docId);
     console.log("已清理临时文档");
 }
 

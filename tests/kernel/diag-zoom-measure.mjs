@@ -9,6 +9,7 @@
  */
 import fs from "node:fs";
 import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const WORKSPACE = "D:\\常青Data";
 const NOTEBOOK = process.env.MM_NOTEBOOK || "20221230192740-wpnntiv";
@@ -83,5 +84,5 @@ try {
     console.log("\nzoom=1 与 zoom=0.55 量测一致?", same(r.at1, r.at055) ? "一致 → zoom 不影响量测" : "不一致 → zoom 影响量测，布局会依赖渲染次序");
 } finally {
     await chrome.close();
-    await api("/api/block/deleteBlock", { id: docId });
+    await removeDoc(api, docId);
 }

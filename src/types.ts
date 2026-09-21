@@ -49,6 +49,34 @@ export interface MMActionExtra {
 }
 
 /**
+ * 结构操作的执行结果。
+ *
+ * 结构操作是异步写内核的（写回 → 内核回推 DOM → 扫描重挂视图），
+ * 中间有几百毫秒画面毫无变化。视图层据此在动作发起时先放一个「乐观占位框」，
+ * 拿到结果后再决定是撤掉占位（成功）还是红边抖动 + 给出原因（失败）。
+ */
+export interface MMActionResult {
+    ok: boolean;
+    /** 失败原因（人话，直接给用户看），成功时省略 */
+    message?: string;
+}
+
+/**
+ * 文档级视图偏好。
+ *
+ * 只记「用户显式改过的项」—— 没改过的继续跟随全局默认，
+ * 否则用户改了全局主题之后所有文档都不跟着变，反而更别扭。
+ * 以块属性 `custom-mindmap-view` 的形式存在列表块上。
+ */
+export interface MMViewPrefs {
+    layout?: MMLayout;
+    theme?: MMThemeId;
+    edge?: MMEdgeStyle;
+    /** 缩放。**不记平移** —— 平移跟画布尺寸强相关，记了很容易错位 */
+    scale?: number;
+}
+
+/**
  * 焦点状态。
  * 三态的键盘归属必须严格分开，否则会与 Protyle 编辑器抢按键。
  */
@@ -205,6 +233,17 @@ export interface MMConfig extends MMRenderOptions {
      * 把一级分支摊成若干列，画布比例回到接近视口的形状。
      */
     columnLayout: boolean;
+    /**
+     * 视图偏好跟文档走。
+     *
+     * 开启后，用户在这个列表里改过的布局 / 主题 / 连线 / 缩放会写进块属性，
+     * 下次打开这个列表就恢复成他调好的样子；没改过的项继续跟随全局默认。
+     */
+    viewPerDoc: boolean;
+    /** 悬停折叠节点时浮出预览卡片（列出前几个子节点） */
+    hoverPreview: boolean;
+    /** 自定义一级分支配色（逗号分隔的十六进制），空串表示用主题自带色板 */
+    customPalette: string;
 }
 
 export const DEFAULT_CONFIG: MMConfig = {
@@ -226,6 +265,9 @@ export const DEFAULT_CONFIG: MMConfig = {
     compactThreshold: 400,
     hardLimit: 2000,
     columnLayout: true,
+    viewPerDoc: true,
+    hoverPreview: true,
+    customPalette: "",
 };
 
 /** 块属性名 */
@@ -240,6 +282,18 @@ export const ATTR_LEGACY_VIEW = "custom-block-list-view";
  * 迁完就把属性删掉。不读它、也不再写它。
  */
 export const ATTR_LEGACY_FOLD = "custom-mindmap-fold";
+
+/**
+ * 文档级视图偏好（`MMViewPrefs` 的序列化形式）。
+ *
+ * 与 `ATTR_VIEW` 分开存：`custom-mindmap` 是「这个列表要显示成导图」的标记，
+ * 会被扫描器反复读写；把偏好塞进去会让标记的语义变混，也让「关掉导图」
+ * 顺手把偏好一起清掉。
+ */
+export const ATTR_VIEW_PREFS = "custom-mindmap-view";
+
+/** 批量操作条上支持的批量动作 */
+export type MMBatchKind = "indent" | "outdent" | "fold" | "unfold" | "delete" | "export";
 
 /** 在列表块元素上的挂载标记 */
 export const MOUNT_FLAG = "data-mm-mounted";

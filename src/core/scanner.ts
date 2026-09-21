@@ -1,8 +1,19 @@
 import { showMessage } from "siyuan";
-import { ATTR_LEGACY_FOLD, ATTR_VIEW, LAZY_FLAG, MOUNT_FLAG } from "../types";
-import type { MMActionExtra, MMActionKind, MMConfig, MMLayout, MMNode, MMTheme } from "../types";
+import { ATTR_LEGACY_FOLD, ATTR_VIEW, ATTR_VIEW_PREFS, LAZY_FLAG, MOUNT_FLAG } from "../types";
+import type {
+    MMActionExtra,
+    MMActionKind,
+    MMActionResult,
+    MMBatchKind,
+    MMConfig,
+    MMLayout,
+    MMNode,
+    MMTheme,
+    MMViewPrefs,
+} from "../types";
 import { MindMapView } from "./renderer";
 import { History } from "./history";
+import { decodeViewPrefs, encodeViewPrefs } from "./prefs";
 import {
     getBlockAttrs,
     getBlockKramdown,
@@ -14,17 +25,21 @@ import {
 } from "../utils/api";
 import {
     deleteNode,
+    deleteNodes,
     duplicateNode,
     indentNode,
+    indentNodesInto,
     insertChildNode,
     insertSiblingNode,
     moveDownNode,
     moveNodeTo,
     moveUpNode,
     outdentNode,
+    outdentNodes,
     pasteNode,
     renameNode,
 } from "./actions";
+import { topLevelOf } from "./tree";
 
 export interface ScannerHooks {
     getOptions: () => MMConfig;
@@ -66,6 +81,26 @@ const ACTION_LABEL: Record<string, string> = {
     move: "移动节点",
     duplicate: "复制节点",
     paste: "粘贴节点",
+};
+
+/**
+ * 失败原因（人话，直接显示在节点上）。
+ *
+ * 原来所有失败都只弹一句「操作未生效，请重试」—— 用户既不知道是哪个节点出的问题，
+ * 也不知道为什么。这些文案会跟着红色抖动一起打在**出问题的那个节点**上。
+ */
+const ACTION_FAIL: Record<string, string> = {
+    insertChild: "插入子节点失败，请重试",
+    insertSiblingBefore: "插入同级节点失败，请重试",
+    insertSiblingAfter: "插入同级节点失败，请重试",
+    delete: "删除失败，这个块可能已经被移除了",
+    indent: "降级失败：前面没有可用的同级节点",
+    outdent: "升级失败：这已经是顶层了",
+    moveUp: "上移失败：已经是第一个了",
+    moveDown: "下移失败：已经是最后一个了",
+    move: "移动失败：目标位置无法放置",
+    duplicate: "复制失败，请重试",
+    paste: "粘贴失败，请重试",
 };
 
 /** 观察选项：内容变化 + 我们关心的那个属性变化 */
@@ -176,6 +211,16 @@ export class Scanner {
      * 也不走 `mm-source-hidden`，纯粹是一个「伴生面板」。
      */
     private side: AuxView | null = null;
+
+    /**
+     * 文档级视图偏好缓存：`listId → 用户显式改过的项`。
+     *
+     * 缓存是必要的 —— 挂载要同步拿到偏好才能决定首次渲染用什么布局 / 主题，
+     * 而读块属性是异步的。块 ID 全局唯一，所以缓存不会串文档。
+     */
+    private prefsCache = new Map<string, MMViewPrefs>();
+    /** 视图偏好的防抖写入定时器（拖缩放条会连着改很多次） */
+    private prefsTimers = new Map<string, number>();
 
     private observer: MutationObserver | null = null;
     private io: IntersectionObserver | null = null;
@@ -480,6 +525,10 @@ export class Scanner {
             // 异步等待期间块可能已经被替换
             if (!list.isConnected || this.views.has(id)) return;
 
+            // 文档级视图偏好要在挂载**之前**注入 —— 首次渲染就得用对布局 / 主题，
+            // 否则用户会先看到一张默认样式的图、再「跳」成他自己调好的样子。
+            const prefs = await this.loadPrefs(id);
+
             const title = getDocTitle(list);
             const view = new MindMapView(
                 list,
@@ -494,12 +543,15 @@ export class Scanner {
                     onLayoutChange: (layout) => this.hooks.onLayoutChange(id, layout),
                     onFullscreen: (root, theme) => this.hooks.onFullscreen(id, root, theme, title),
                     onRename: (node, text) => void this.applyRename(node, text, id),
-                    onNodeAction: (kind, node, extra) => void this.applyAction(kind, node, extra, id),
+                    onNodeAction: (kind, node, extra) => this.applyAction(kind, node, extra, id),
+                    onBatchAction: (kind, nodes) => this.applyBatch(kind, nodes, id),
+                    onViewPrefs: (next) => this.savePrefs(id, next),
                     onHistory: (redo) => this.undo(redo),
                 },
                 title,
                 "inline",
             );
+            view.applyViewPrefs(prefs);
 
             this.pauseObserver(() => {
                 view.mount();
@@ -591,8 +643,59 @@ export class Scanner {
         this.focusSoon(listId);
     }
 
+    /* ================================================================ 视图偏好 */
+
+    /**
+     * 读这个列表块的文档级视图偏好。
+     *
+     * 关闭 `viewPerDoc` 时直接返回空 —— 空偏好等于「全部跟随全局默认」，
+     * 视图那边不需要知道开关的存在。
+     */
+    async loadPrefs(listId: string): Promise<MMViewPrefs> {
+        if (!this.hooks.getOptions().viewPerDoc || !listId) return {};
+        const cached = this.prefsCache.get(listId);
+        if (cached) return cached;
+        let prefs: MMViewPrefs = {};
+        try {
+            const attrs = await getBlockAttrs(listId);
+            prefs = decodeViewPrefs(attrs[ATTR_VIEW_PREFS]);
+        } catch (err) {
+            console.warn("[mindmap] 读取视图偏好失败，按默认处理", listId, err);
+        }
+        this.prefsCache.set(listId, prefs);
+        return prefs;
+    }
+
+    /**
+     * 写回视图偏好（防抖）。
+     *
+     * 拖缩放条、连点主题会连着触发很多次，每次都打一次内核太浪费；
+     * 而且写块属性本身会引来 Protyle 的属性刷新，密集写会看着抖。
+     */
+    savePrefs(listId: string, prefs: MMViewPrefs) {
+        if (!this.hooks.getOptions().viewPerDoc || !listId) return;
+        this.prefsCache.set(listId, { ...prefs });
+        const prev = this.prefsTimers.get(listId);
+        if (prev) window.clearTimeout(prev);
+        this.prefsTimers.set(
+            listId,
+            window.setTimeout(() => {
+                this.prefsTimers.delete(listId);
+                const cur = this.prefsCache.get(listId) ?? {};
+                // 编码为空串说明用户把偏好全清了，这时要把属性整个删掉，
+                // 而不是留一个空值 —— 留空值会让「没设过」和「设成空」两种情况混在一起
+                void setBlockAttrs(listId, { [ATTR_VIEW_PREFS]: encodeViewPrefs(cur) || null });
+            }, 420),
+        );
+    }
+
     /** 结构操作（全屏视图也会调用） */
-    async applyAction(kind: MMActionKind, node: MMNode, extra?: MMActionExtra, listId = "") {
+    async applyAction(
+        kind: MMActionKind,
+        node: MMNode,
+        extra?: MMActionExtra,
+        listId = "",
+    ): Promise<MMActionResult> {
         this.lastUserActionAt = Date.now();
         const before = await this.snapshot(listId);
         let ok = false;
@@ -645,12 +748,13 @@ export class Scanner {
                 if (extra?.data) ok = await pasteNode(node, extra.data);
                 break;
             default:
-                return;
+                return { ok: false, message: "不支持的操作" };
         }
 
         if (!ok) {
-            showMessage("操作未生效，请重试", 3000, "error");
-            return;
+            // 失败反馈交给视图去做（在原节点上打红边 + 抖动），这里只把原因带回去。
+            // 视图手里有节点元素，能指出「是哪一个」；这里只有一个 ID。
+            return { ok: false, message: ACTION_FAIL[kind] ?? "操作未生效，请重试" };
         }
         this.record(listId, ACTION_LABEL[kind] ?? "操作", before, await this.snapshot(listId));
 
@@ -670,6 +774,69 @@ export class Scanner {
         // 结构操作必然重建 `.list`，焦点一定会掉；接回来用户才能接着用键盘
         // （尤其「删除 → Ctrl+Z」这条链路，第二步靠的就是焦点还在导图上）
         this.focusSoon(listId);
+        return { ok: true };
+    }
+
+    /**
+     * 批量结构操作。
+     *
+     * **整体成功或整体回滚** —— 内核没有批量接口，只能逐条调用，
+     * 中途失败如果不回滚，用户的数据就留在「删了一半」的状态里，
+     * 比整个操作失败糟糕得多。回滚靠的是操作前取的那份 kramdown 快照
+     * （和撤销栈用的是同一份东西）。
+     */
+    async applyBatch(kind: MMBatchKind, nodes: MMNode[], listId = ""): Promise<MMActionResult> {
+        this.lastUserActionAt = Date.now();
+
+        // 祖先也被选中的节点先剔掉：移动一个节点和它的后代是自相矛盾的
+        const targets = topLevelOf(nodes);
+        if (targets.length === 0) return { ok: true };
+
+        const before = await this.snapshot(listId);
+        let failed: MMNode[] = [];
+
+        switch (kind) {
+            case "indent": {
+                // 语义取「多行缩进」的通用约定：全部变成**第一项上面那个节点**的子节点。
+                // 一条条单独降级会串成 A→B→C 的阶梯，那不是用户要的。
+                const first = targets[0];
+                const sibs = first.parent?.children ?? [];
+                const idx = sibs.indexOf(first);
+                const anchor = idx > 0 ? sibs[idx - 1] : null;
+                if (!anchor) {
+                    return { ok: false, message: "降级失败：选中的第一项上面没有同级节点" };
+                }
+                failed = await indentNodesInto(targets, anchor);
+                break;
+            }
+            case "outdent":
+                failed = await outdentNodes(targets);
+                break;
+            case "delete":
+                failed = await deleteNodes(targets);
+                break;
+            default:
+                return { ok: false, message: "不支持的批量操作" };
+        }
+
+        if (failed.length > 0) {
+            if (!before) {
+                return { ok: false, message: "批量操作失败，请重试" };
+            }
+            const restored = await restoreBlock(listId, before);
+            if (!restored) {
+                showMessage("批量操作失败，自动还原也没成功，请手动按 Ctrl+Z", 5000, "error");
+                return { ok: false, message: "操作失败，请重试" };
+            }
+            this.rescanSoon();
+            this.focusSoon(listId);
+            return { ok: false, message: `批量${ACTION_LABEL[kind] ?? "操作"}失败，已还原到操作前` };
+        }
+
+        this.record(listId, `批量${ACTION_LABEL[kind] ?? "操作"}`, before, await this.snapshot(listId));
+        this.rescanSoon();
+        this.focusSoon(listId);
+        return { ok: true };
     }
 
     /**

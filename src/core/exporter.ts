@@ -112,11 +112,16 @@ function escapeAttr(s: string): string {
     return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
 }
 
-export async function buildSvg(rootEl: HTMLElement): Promise<string> {
+export async function buildSvg(rootEl: HTMLElement, crop?: ExportCrop): Promise<string> {
     const { world, edges, nodes } = worldParts(rootEl);
 
-    const W = Math.ceil(parseFloat(world.style.width) || world.offsetWidth);
-    const H = Math.ceil(parseFloat(world.style.height) || world.offsetHeight);
+    const full = worldSize(world);
+    const size = cropSize(full, crop);
+    const W = size.w;
+    const H = size.h;
+    // 裁剪时把整层内容整体左移 / 上移，让选中的那块落在 (0,0)
+    const ox = size.x;
+    const oy = size.y;
 
     // 解析主题变量
     const vars = readResolvedVars(rootEl);
@@ -141,14 +146,47 @@ export async function buildSvg(rootEl: HTMLElement): Promise<string> {
         `.mm-root.mm-export .mm-toolbar,.mm-root.mm-export .mm-viewport{display:none;}`,
         `]]></style>`,
         `<rect x="0" y="0" width="${W}" height="${H}" fill="${escapeAttr(bg)}"/>`,
-        `<g class="mm-edges">${edges.innerHTML}</g>`,
+        `<g class="mm-edges" transform="translate(${-ox},${-oy})">${edges.innerHTML}</g>`,
         `<foreignObject x="0" y="0" width="${W}" height="${H}">`,
         `<div xmlns="http://www.w3.org/1999/xhtml" class="mm-root mm-export" style="${escapeAttr(styleVars)};--mm-font:${escapeAttr(font)}">`,
-        `<div class="mm-nodes">${nodeHtml}</div>`,
+        `<div class="mm-nodes" style="position:absolute;left:${-ox}px;top:${-oy}px">${nodeHtml}</div>`,
         `</div>`,
         `</foreignObject>`,
         `</svg>`,
     ].join("");
+}
+
+/**
+ * 导出裁剪框。
+ *
+ * 「只导选中」需要一个「把画布裁到选中子树」的能力。做法不是重新排版，
+ * 而是把整层内容平移 `-x/-y` 之后只保留 `w×h` 的视口 —— 节点坐标一个都不动，
+ * 所以导出的东西跟屏幕上看到的一模一样。
+ */
+export interface ExportCrop {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+}
+
+function worldSize(world: HTMLElement): ExportCrop {
+    return {
+        x: 0,
+        y: 0,
+        w: Math.ceil(parseFloat(world.style.width) || world.offsetWidth || 1),
+        h: Math.ceil(parseFloat(world.style.height) || world.offsetHeight || 1),
+    };
+}
+
+function cropSize(full: ExportCrop, crop?: ExportCrop): ExportCrop {
+    if (!crop) return full;
+    return {
+        x: Math.max(0, Math.floor(crop.x)),
+        y: Math.max(0, Math.floor(crop.y)),
+        w: Math.max(1, Math.ceil(crop.w)),
+        h: Math.max(1, Math.ceil(crop.h)),
+    };
 }
 
 function safeName(title: string): string {
@@ -167,16 +205,27 @@ function download(blob: Blob, filename: string) {
     setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
-export async function exportSvg(rootEl: HTMLElement, title: string): Promise<void> {
-    const svg = await buildSvg(rootEl);
+export async function exportSvg(rootEl: HTMLElement, title: string, crop?: ExportCrop): Promise<void> {
+    const svg = await buildSvg(rootEl, crop);
     download(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }), `${safeName(title)}.svg`);
 }
 
-export async function exportPng(rootEl: HTMLElement, title: string, scale = 2): Promise<void> {
-    const svg = await buildSvg(rootEl);
+export async function exportPng(rootEl: HTMLElement, title: string, scale = 2, crop?: ExportCrop): Promise<void> {
+    const blob = await renderPngBlob(rootEl, scale, crop);
+    if (!blob) throw new Error("PNG 编码失败");
+    download(blob, `${safeName(title)}.png`);
+}
+
+/**
+ * 把当前导图光栅化成 PNG。
+ * 导出文件与「复制到剪贴板」共用同一条链路，只是最后的去处不同。
+ */
+export async function renderPngBlob(rootEl: HTMLElement, scale = 2, crop?: ExportCrop): Promise<Blob | null> {
+    const svg = await buildSvg(rootEl, crop);
     const { world } = worldParts(rootEl);
-    const W = Math.ceil(parseFloat(world.style.width) || world.offsetWidth);
-    const H = Math.ceil(parseFloat(world.style.height) || world.offsetHeight);
+    const size = cropSize(worldSize(world), crop);
+    const W = size.w;
+    const H = size.h;
 
     // 限制画布总像素，避免超出浏览器上限
     const maxSide = 8192;
@@ -191,13 +240,15 @@ export async function exportPng(rootEl: HTMLElement, title: string, scale = 2): 
         const ctx = canvas.getContext("2d");
         if (!ctx) throw new Error("无法创建 canvas 上下文");
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
-        if (!blob) throw new Error("PNG 编码失败");
-        download(blob, `${safeName(title)}.png`);
+        return await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
     } finally {
         URL.revokeObjectURL(url);
     }
+}
+
+/** 把导图序列化成 Markdown 大纲并下载 —— 方便贴到别处继续用 */
+export function exportOutline(title: string, markdown: string): void {
+    download(new Blob([markdown], { type: "text/markdown;charset=utf-8" }), `${safeName(title)}.md`);
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {

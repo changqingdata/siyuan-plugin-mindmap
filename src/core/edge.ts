@@ -32,8 +32,22 @@ export interface Connector {
     width: number;
     /** 用途：主干 / 脊 / 支线。调用方据此上色 */
     kind: ConnectorKind;
-    /** 该线段属于第几个子节点（主干与脊为 null）。用下标而不是引用，方便调用方反查节点 */
+    /**
+     * 该线段属于第几个子节点（主干与脊为 null）。
+     *
+     * ⚠️ 这个下标**始终是 `kids` 数组里的原始下标**，不是分组内的下标。
+     * 思维导图模式下根节点两侧都有子节点，连线按方向分成两组分别生成；
+     * 早先这里给的是组内下标，调用方拿它反查 `n.kids[i]` 就会取错节点
+     * （左右两侧的支线颜色互相串）。
+     */
     childIndex: number | null;
+    /**
+     * 虚线样式（`stroke-dasharray` 的值）。省略即实线。
+     *
+     * 用来做「连线语义化」：通往**已完成任务**的那条支线画成虚线，
+     * 一眼就能看出「这一支已经做完了」。
+     */
+    dash?: string;
 }
 
 export interface ConnectorInput {
@@ -45,6 +59,13 @@ export interface ConnectorInput {
     gap: number;
     /** 基础线宽（父节点处） */
     base: number;
+    /**
+     * 逐个子节点的虚线样式，下标与 `kids` 对齐。空串 / undefined 表示实线。
+     *
+     * 只作用于「通往该子节点的那条支线」—— 主干与脊是同级共享的一段，
+     * 按子节点区分不了，硬拆反而会把汇聚感打散。
+     */
+    kidDash?: Array<string | undefined>;
 }
 
 /** 主干长度范围，避免太短看不出汇聚、太长显得松散 */
@@ -56,7 +77,7 @@ const MAX_RADIUS = 9;
 const r = (n: number) => Math.round(n * 100) / 100;
 
 export function buildConnectors(input: ConnectorInput): Connector[] {
-    const { parent, kids, mode, style, gap, base } = input;
+    const { parent, kids, mode, style, gap, base, kidDash } = input;
     if (kids.length === 0) return [];
 
     const trunk = Math.max(MIN_TRUNK, Math.min(gap * 0.44, MAX_TRUNK));
@@ -65,8 +86,8 @@ export function buildConnectors(input: ConnectorInput): Connector[] {
     const radius = Math.max(3, Math.min(trunk * 0.5, MAX_RADIUS));
 
     return mode === "tree"
-        ? vertical(parent, kids, style, trunk, base, spineW, stubW, radius)
-        : horizontal(parent, kids, style, trunk, base, spineW, stubW, radius);
+        ? vertical(parent, kids, style, trunk, base, spineW, stubW, radius, kidDash)
+        : horizontal(parent, kids, style, trunk, base, spineW, stubW, radius, kidDash);
 }
 
 /* ------------------------------------------------------------------ 纵向（树状图） */
@@ -80,14 +101,22 @@ function vertical(
     spineW: number,
     stubW: number,
     radius: number,
+    kidDash?: Array<string | undefined>,
 ): Connector[] {
     const px = parent.x + parent.w / 2;
     const py = parent.y + parent.h;
     const out: Connector[] = [];
+    const dashAt = (i: number) => (kidDash?.[i] ? { dash: kidDash[i] } : {});
 
     if (style === "straight") {
         kids.forEach((k, i) => {
-            out.push({ d: `M${r(px)},${r(py)} L${r(k.x + k.w / 2)},${r(k.y)}`, width: stubW, kind: "stub", childIndex: i });
+            out.push({
+                d: `M${r(px)},${r(py)} L${r(k.x + k.w / 2)},${r(k.y)}`,
+                width: stubW,
+                kind: "stub",
+                childIndex: i,
+                ...dashAt(i),
+            });
         });
         return out;
     }
@@ -108,7 +137,13 @@ function vertical(
         const ky = k.y;
         const dx = Math.sign(kx - px);
         if (style === "elbow" || dx === 0 || Math.abs(kx - px) < radius * 1.2) {
-            out.push({ d: `M${r(kx)},${r(sy)} L${r(kx)},${r(ky)}`, width: stubW, kind: "stub", childIndex: i });
+            out.push({
+                d: `M${r(kx)},${r(sy)} L${r(kx)},${r(ky)}`,
+                width: stubW,
+                kind: "stub",
+                childIndex: i,
+                ...dashAt(i),
+            });
         } else {
             const x0 = kx - dx * radius;
             out.push({
@@ -116,6 +151,7 @@ function vertical(
                 width: stubW,
                 kind: "stub",
                 childIndex: i,
+                ...dashAt(i),
             });
         }
     });
@@ -133,36 +169,40 @@ function horizontal(
     spineW: number,
     stubW: number,
     radius: number,
+    kidDash?: Array<string | undefined>,
 ): Connector[] {
     const out: Connector[] = [];
 
-    // 思维导图模式下根节点两侧都有子节点，必须按方向分组，各自有自己的主干与脊
-    const groups = new Map<1 | -1, EdgeRect[]>();
-    for (const k of kids) {
+    // 思维导图模式下根节点两侧都有子节点，必须按方向分组，各自有自己的主干与脊。
+    // 分组时把**原始下标**一起带上 —— 调用方要靠它反查节点（上色 / 虚线），
+    // 用组内下标会在左右两侧之间串位。
+    const groups = new Map<1 | -1, Array<{ k: EdgeRect; i: number }>>();
+    kids.forEach((k, i) => {
         const list = groups.get(k.dir);
-        if (list) list.push(k);
-        else groups.set(k.dir, [k]);
-    }
+        if (list) list.push({ k, i });
+        else groups.set(k.dir, [{ k, i }]);
+    });
 
     for (const [dir, group] of groups) {
         const px = dir === 1 ? parent.x + parent.w : parent.x;
         const py = parent.y + parent.h / 2;
 
         if (style === "straight") {
-            group.forEach((k, i) => {
+            for (const { k, i } of group) {
                 const kx = dir === 1 ? k.x : k.x + k.w;
                 out.push({
                     d: `M${r(px)},${r(py)} L${r(kx)},${r(k.y + k.h / 2)}`,
                     width: stubW,
                     kind: "stub",
                     childIndex: i,
+                    ...(kidDash?.[i] ? { dash: kidDash[i] } : {}),
                 });
-            });
+            }
             continue;
         }
 
         const sx = px + dir * trunk;
-        const cys = group.map((k) => k.y + k.h / 2);
+        const cys = group.map(({ k }) => k.y + k.h / 2);
 
         out.push({ d: `M${r(px)},${r(py)} L${r(sx)},${r(py)}`, width: base, kind: "trunk", childIndex: null });
         out.push({
@@ -172,12 +212,19 @@ function horizontal(
             childIndex: null,
         });
 
-        group.forEach((k, i) => {
+        for (const { k, i } of group) {
             const kx = dir === 1 ? k.x : k.x + k.w;
             const ky = k.y + k.h / 2;
             const dy = Math.sign(ky - py);
+            const dash = kidDash?.[i] ? { dash: kidDash[i] } : {};
             if (style === "elbow" || dy === 0 || Math.abs(ky - py) < radius * 1.2) {
-                out.push({ d: `M${r(sx)},${r(ky)} L${r(kx)},${r(ky)}`, width: stubW, kind: "stub", childIndex: i });
+                out.push({
+                    d: `M${r(sx)},${r(ky)} L${r(kx)},${r(ky)}`,
+                    width: stubW,
+                    kind: "stub",
+                    childIndex: i,
+                    ...dash,
+                });
             } else {
                 const y0 = ky - dy * radius;
                 out.push({
@@ -185,9 +232,10 @@ function horizontal(
                     width: stubW,
                     kind: "stub",
                     childIndex: i,
+                    ...dash,
                 });
             }
-        });
+        }
     }
 
     return out;
