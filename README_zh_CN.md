@@ -325,26 +325,32 @@ src/
 - **布局引擎**：把坐标抽象成「深度轴」和「交叉轴」，一套代码同时支持左右和上下两种方向；父节点的交叉位置会钳制在自己的占位槽内，避免子树不对称时溢出到兄弟节点位置。
 - **性能保护**：列表块进入视口附近才挂载；节点数超过阈值自动收紧间距，超过渲染上限则暂停渲染并给出「仍然渲染」入口。
 
-## 上架前必改（TODO）
+## 维护者须知
 
-> 下面是提交集市前**必须**处理的事项。第 1 条是占位值，不替换会被审核打回。
+### 1. 发布已自动化
 
-### 1. 两处占位值
+`.github/workflows/release.yml` 在每次 push 到 `main` 时运行：
 
-- `plugin.json` → `author`：现在是 `"MindMap Plugin"`，改成你的署名或 GitHub ID
-- `plugin.json` → `url`：现在是 `"https://github.com/your-name/siyuan-plugin-mindmap"`，
-  改成真实的仓库地址（集市会校验可访问性）
+1. 跑 `npm run check` —— 8 道静态校验 + 312 条单元断言 + 96 条产物冒烟断言
+2. 构建 `package.zip`，并校验它含齐必需文件
+3. 创建 tag 为 `v<version>` 的 GitHub Release —— **该版本已发过就跳过**（幂等）
 
-### 2. 仓库本身（容易漏，而且漏了集市上拿不到包）
+**发新版本只需两步：改 `plugin.json` 的 `version`，push 到 `main`。**
+
+> ⚠️ 为什么非得有 Release，不能只 push 代码：**集市拉取的是 Release 里的 `package.zip`，
+> 不是仓库里的源码。** 这一点在本仓库比一般插件更要紧 —— `.gitignore` 排除了
+> `index.js` / `index.css` / `i18n/` 这些**构建产物**，所以「仓库源码」本身
+> **不是一个可用的插件包**。
+
+### 2. 仓库侧要求（已满足，别改坏）
 
 - **仓库名必须与 `plugin.json` 的 `name` 完全一致**（即 `siyuan-plugin-mindmap`）——
   集市按 `name` 做唯一性校验
-- **默认分支必须是 `main`**
-- 必须发布一个 **GitHub Release**，并把 `package.zip` 作为二进制附件上传。
-  集市拉取的是 **Release 里的 `package.zip`**，不是仓库里的源码 ——
-  只 push 代码、不发 Release，集市上是拿不到包的
-- Release 的 Tag 用版本号（如 `1.0.0`）。后续更新递增 `version` 再发一个新 Release 即可，
-  **不需要重新提 PR**
+- **默认分支必须是 `main`** —— 发布工作流靠它触发
+- Release 的 tag 用 `v<version>` 形式（与官方 `plugin-sample` 风格一致）
+- `.gitignore` 里的根级产物**必须带前导 `/` 锚定**。不要写裸的 `i18n/` 或 `index.css`：
+  它们会匹配**任意层级**，从而把真源 `src/i18n/*.json` 与 `src/styles/index.css`
+  静默排除在仓库之外。
 
 ### 3. 关于 `minAppVersion`（曾经写错，记一下为什么是现在这个值）
 

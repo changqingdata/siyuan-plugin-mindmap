@@ -2,11 +2,19 @@ node_modules/
 src/generated/
 
 # 构建产物（插件包内容，由 scripts/build.mjs 生成）
-index.js
-index.js.map
-index.css
-i18n/
-package.zip
+#
+# ⚠️⚠️ 必须带前导 `/` 锚定到**仓库根**。裸写 `i18n/` 或 `index.css`
+# 会匹配**任意层级**的同名路径，于是把真源一起吞掉：
+#   · 裸 `i18n/`      → 吃掉 `src/i18n/zh_CN.json` / `en_US.json`（i18n 真源！）
+#   · 裸 `index.css`  → 吃掉 `src/styles/index.css`（CSS 真源！）
+# 后果：仓库里没有这两份真源 → 别人 clone 下来构建不出完整包，
+# 而且丢的是**唯一的一份**（`src/generated/` 与根目录产物都是可再生的，
+# 真源不是）。实测这三份真源曾被静默排除在仓库之外。
+/index.js
+/index.js.map
+/index.css
+/i18n/
+/package.zip
 
 # 编辑器
 .vscode/

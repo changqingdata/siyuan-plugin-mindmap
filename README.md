@@ -115,26 +115,32 @@ npm run deploy     # build + sync into the SiYuan workspace
 
 Place this folder under `{workspace}/data/plugins/`; SiYuan loads `index.js` and `index.css` directly.
 
-## Before publishing (TODO)
+## Maintainer notes
 
-> Everything that **must** be handled before submitting to the marketplace.
-> Item 1 is a placeholder — the review will reject it if you leave it as is.
+### 1. Releasing is automated
 
-### 1. Two placeholder values
+`.github/workflows/release.yml` runs on every push to `main`:
 
-- `plugin.json` → `author`: currently `"MindMap Plugin"` — use your own name or GitHub handle
-- `plugin.json` → `url`: currently `"https://github.com/your-name/siyuan-plugin-mindmap"` — use the real repository URL
+1. `npm run check` — 8 static gates + 312 unit assertions + 96 package smoke assertions
+2. builds `package.zip` and verifies it contains the required files
+3. creates a GitHub Release tagged `v<version>` — **only if that release does not exist yet** (idempotent)
 
-### 2. The repository itself (easy to miss, and the bazaar gets nothing without it)
+**To ship a new version: bump `version` in `plugin.json` and push to `main`.** That is the whole process.
+
+> ⚠️ Why a Release at all, and not just a push: **the bazaar pulls `package.zip` from the
+> Release, not the source in the repo.** This matters more here than in a typical plugin,
+> because `.gitignore` excludes the build artifacts (`index.js` / `index.css` / `i18n/`) —
+> so the repo source on its own is **not** a usable package.
+
+### 2. Repository requirements (already satisfied — do not break them)
 
 - **The repo name must match `plugin.json`'s `name` exactly** (`siyuan-plugin-mindmap`) —
   the bazaar enforces uniqueness by `name`
-- **The default branch must be `main`**
-- You must publish a **GitHub Release** and attach `package.zip` as a binary asset.
-  The bazaar pulls **the `package.zip` from the Release**, not the source in the repo —
-  pushing code without a Release means there is nothing for the bazaar to fetch
-- Use the version number as the Release tag (e.g. `1.0.0`). For later updates, bump
-  `version` and publish a new Release — **no new PR needed**
+- **The default branch must be `main`** — the release workflow triggers on it
+- Release tags use the `v<version>` form (same style as the official `plugin-sample`)
+- `.gitignore` anchors root-level build artifacts with a leading `/`. Do **not** write a
+  bare `i18n/` or `index.css` there: it matches at **any** depth and would silently
+  exclude the real sources `src/i18n/*.json` and `src/styles/index.css`.
 
 ### 3. About `minAppVersion` (this was wrong once — here is why it is what it is)
 

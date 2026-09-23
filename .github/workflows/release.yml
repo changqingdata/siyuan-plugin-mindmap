@@ -1,0 +1,96 @@
+# 构建并发布：跑完测试 → 打包 → 发 GitHub Release（附件是 package.zip）
+#
+# ## 为什么需要这个工作流
+#
+# 思源集市拉取的是 **Release 里的 `package.zip`**，不是仓库里的源码。
+# 而本仓库的 `.gitignore` 排除了 `index.js` / `index.css` / `i18n/` 这些**构建产物**，
+# 所以「仓库源码」本身根本不是一个可用的插件包 —— 不发 Release，集市上就拿不到东西。
+#
+# 另外，Release 只能由仓库自己的令牌创建（`secrets.GITHUB_TOKEN`），
+# 这也是本项目唯一不需要外部凭据的发布路径。
+#
+# ## 怎么发新版本
+#
+#   1. 改 `plugin.json` 的 `version`（必须是 semver，例如 1.0.1）
+#   2. push 到 `main`
+#
+# 就这两步。工作流会自动跑测试、打包、建 Release，tag 为 `v<version>`
+# （与官方 plugin-sample 的 tag 风格一致）。
+#
+# ## 幂等
+#
+# 每次 push 到 main 都会触发，但**同版本只会发一次**：
+# 如果 `v<version>` 这个 Release 已经存在，就直接跳过。
+# 所以日常改代码不会产生重复 Release，也不会覆盖已发布的包。
+#
+# ⚠️ 发布前必须让测试全绿 —— 这一步是**门**，不是走过场：
+# `npm run check` 覆盖 8 道静态校验 + 312 条单元断言 + 96 条产物冒烟。
+# 测试红了就不会有 Release。
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # 这一步同时产出 package.zip（check 内部会跑 build.mjs --zip）
+      - name: Test and build
+        run: npm run check
+
+      - name: Verify package.zip contents
+        run: |
+          set -euo pipefail
+          echo "--- package.zip ---"
+          unzip -l package.zip
+          # 集市要求的必需文件，缺一个就中止（别把半个包发出去）
+          for f in plugin.json index.js index.css README.md; do
+            unzip -l package.zip | grep -q " ${f}$" || { echo "package.zip 缺少 ${f}"; exit 1; }
+          done
+
+      - name: Create release if this version is not released yet
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./plugin.json').version")"
+          TAG="v${VERSION}"
+          echo "plugin.json version = ${VERSION}  ->  tag = ${TAG}"
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} 已存在，跳过（同版本不重复发布）。"
+            exit 0
+          fi
+
+          # 用 notes 文件而不是 --notes "..."：正文里有反引号，
+          # 在双引号里会被 bash 当成命令替换执行。
+          {
+            echo "大纲导图 ${VERSION}"
+            echo
+            echo "安装包见附件 package.zip。"
+            echo
+            echo "安装方式：思源「设置 → 集市 → 已下载」中安装，或解压到"
+            echo "{工作空间}/data/plugins/siyuan-plugin-mindmap 。"
+          } > /tmp/release-notes.md
+
+          gh release create "${TAG}" package.zip \
+            --title "${TAG}" \
+            --notes-file /tmp/release-notes.md
