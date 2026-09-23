@@ -589,10 +589,14 @@ try {
     })()`);
     await sleep(1800);
     const titles = await texts(".b3-dialog--open .config-name");
-    const WANT = ["显示层级编号", "紧凑模式", "Ctrl + 滚轮缩放", "滚轮平移导图", "懒渲染", "布局动效", "视图偏好跟文档走", "悬停预览折叠节点", "渲染上限", "紧凑模式阈值"];
+    const WANT = ["显示层级编号", "紧凑模式", "Ctrl + 滚轮缩放", "滚轮平移导图", "懒渲染", "布局动效", "视图偏好跟文档走", "悬停预览折叠节点", "渲染上限", "紧凑模式阈值", "画布高度"];
     const missing = WANT.filter((w) => !titles.some((t) => t.includes(w)));
-    ok(titles.length >= 26, "设置面板条目数（≥26）", `${titles.length} 项`);
-    ok(missing.length === 0, "本文件验的每一项都能在设置面板上找到（设置项与代码没脱节）", missing.length ? `缺：${missing.join(" / ")}` : "10/10 命中");
+    ok(titles.length >= 28, "设置面板条目数（≥28）", `${titles.length} 项`);
+    ok(missing.length === 0, "本文件验的每一项都能在设置面板上找到（设置项与代码没脱节）", missing.length ? `缺：${missing.join(" / ")}` : `${WANT.length}/${WANT.length} 命中`);
+    // 「画布高度」有**两行**（策略下拉 + 像素数字框），而两个标题互为子串 ——
+    // 上面那条用 `includes` 查，任何一行都能替另一行冒充。所以这两条按**精确相等**查。
+    ok(titles.includes("画布高度"), "面板上有「画布高度」策略下拉（精确标题，不让数字框冒充）");
+    ok(titles.includes("画布高度（px）"), "面板上有「画布高度（px）」数字框（精确标题）");
     const helpBtn = await page.eval(`(() => {
         const row = [...document.querySelectorAll('.b3-dialog--open .config-name')].find((e) => (e.textContent || '').includes('查看快捷键'));
         if (!row) return 'no-row';

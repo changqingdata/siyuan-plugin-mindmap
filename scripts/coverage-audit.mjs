@@ -259,8 +259,15 @@ function settingItems() {
     for (const m of indexFold.matchAll(/addToggle\(\s*("(?:[^"\\]|\\.)*")\s*,\s*\n?\s*"(?:[^"\\]|\\.)*"\s*,\s*\n?\s*(this\.config\.\w+)/g)) {
         push("toggle", m[1].slice(1, -1), m[2].replace("this.config.", ""));
     }
-    for (const m of indexFold.matchAll(/addSelect\(\s*("(?:[^"\\]|\\.)*")\s*,\s*\n?\s*"(?:[^"\\]|\\.)*"\s*,\s*\n?\s*(\w+)/g)) {
-        push("select", m[1].slice(1, -1), m[2]);
+    // 第三个参数有两种写法：
+    //   · `this.localize(EDGE_OPTIONS, "edge")` / `Object.fromEntries(...)` —— 抓首词当配置键线索
+    //   · **内联对象字面量** `{ auto: …, fixed: …, fill: … }` —— 抓不到键，留空
+    // ⚠️ 原来只认 `(\w+)`，于是以 `{` 开头的内联对象**整条被静默跳过**：
+    //    表现是「设置项 N」比面板实测少 1，不报错、不红，只是少了一行。
+    //    这正是「探针不会红，只会给出过时结论」的又一例 —— 靠下面那条
+    //    「两个数字必须相等」的自检才逼出来的。
+    for (const m of indexFold.matchAll(/addSelect\(\s*("(?:[^"\\]|\\.)*")\s*,\s*\n?\s*"(?:[^"\\]|\\.)*"\s*,\s*\n?\s*([\w{])/g)) {
+        push("select", m[1].slice(1, -1), m[2] === "{" ? "" : m[2]);
     }
     for (const m of indexFold.matchAll(/addNumber\(\s*("(?:[^"\\]|\\.)*")/g)) push("number", m[1].slice(1, -1));
     for (const m of indexFold.matchAll(/addText\(\s*("(?:[^"\\]|\\.)*")/g)) push("text", m[1].slice(1, -1));
@@ -590,6 +597,25 @@ for (const c of CLAIMS) for (const p of auditClaim(c).probes) claimedTokens.add(
 const HELP_TEXT = shortcutBlock().replace(/\s+/g, "");
 const undocumented = DOC_ONLY_KEYS.filter((d) => KEYS.keys.includes(d.key) && !HELP_TEXT.includes(d.needle));
 
+/**
+ * 设置面板的**实测**条目数。
+ *
+ * 这个数只能在真机上量（面板是运行时用 `setting.addItem` 堆出来的），静态解析不出来。
+ * 所以它从 `diag-settings.mjs` 那条断言里读 —— **单一来源**。
+ *
+ * ⚠️ 以前这里写死过一个数字，加设置项时忘了同步，于是报告里那行
+ * 「设置项 26（面板实测 26）」看着挺对，其实是**两份各自维护的数字恰好相等**。
+ * 那种「一致性」是巧合，不是保证 —— 和 `KNOWN_COVERED` 要自证是同一个道理。
+ */
+const measuredSettings = (() => {
+    try {
+        const m = /titles\.length >= (\d+)/.exec(read(path.join(TESTS, "kernel", "diag-settings.mjs")));
+        return m ? Number(m[1]) : null;
+    } catch {
+        return null;
+    }
+})();
+
 /* ---------------------------------------------------------------- 自检 */
 
 /**
@@ -612,6 +638,15 @@ if (COMMANDS.length === 0) SELF_CHECK.push("一个 addCommand 都没解析出来
 if (MENUS.length === 0) SELF_CHECK.push("一条宿主菜单文案都没解析出来 —— 正则脱节");
 if (UI.length === 0) SELF_CHECK.push("一条自绘 UI 文案都没解析出来 —— 正则脱节");
 if (SETTINGS.length === 0) SELF_CHECK.push("一个设置项都没解析出来 —— 正则脱节");
+if (measuredSettings === null) SELF_CHECK.push("读不到 diag-settings.mjs 里的面板条目数断言 —— 「设置项 N（面板实测 M）」那一栏会失去意义");
+// ★ 两个数字**必须相等**。不等就说明解析器漏了某种写法（面板是唯一事实来源）。
+//   以前这行只是「并排打印两个数，等一个细心的人去看」—— 现在它会自己喊疼。
+if (measuredSettings !== null && SETTINGS.length !== measuredSettings) {
+    SELF_CHECK.push(
+        `静态解析出 ${SETTINGS.length} 个设置项，面板实测 ${measuredSettings} 个（差 ${measuredSettings - SETTINGS.length}）` +
+            " —— 多半是解析器漏了某种 addItem 写法，别当成「面板多了个东西」",
+    );
+}
 // 已知覆盖表自身也会脱节：入口文案改了、或那段测试被删了，表却还在这儿说「已覆盖」。
 const orphanClaims = KNOWN_COVERED.filter((k) => !k.matched);
 if (orphanClaims.length) SELF_CHECK.push(`已知覆盖表有 ${orphanClaims.length} 条的 item 名对不上任何入口（改文案时忘了同步）：${orphanClaims.map((k) => k.item).join(" / ")}`);
@@ -648,7 +683,7 @@ console.log("大纲导图 · 用户可见入口 × 测试命中 覆盖审计");
 console.log("=".repeat(104));
 console.log(
     `测试文件 ${testFiles.length} 支 · 命令 ${COMMANDS.length} · 菜单文案 ${MENUS.length} · ` +
-        `自绘UI ${UI.length} · 设置项 ${SETTINGS.length}（面板实测 26）· 快捷键承诺 ${CLAIMS.length} 条`,
+        `自绘UI ${UI.length} · 设置项 ${SETTINGS.length}（面板实测 ${measuredSettings ?? "?"}）· 快捷键承诺 ${CLAIMS.length} 条`,
 );
 console.log("");
 if (SELF_CHECK.length) {

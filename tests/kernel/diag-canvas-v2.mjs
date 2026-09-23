@@ -23,6 +23,11 @@
  *  12. P2-5 收拢动画      折叠时出现过 .mm-node.mm-collapsing
  *  13. P2-2 导出增强      真点菜单 → 拦下载 → 验产物（SVG 尺寸/连线层/文字、PNG 魔数/2 倍分辨率、
  *                         markdown 首行与缩进、只导出选中的裁剪确实更小）
+ *  14. P1-1b 拖拽悬停     停在折叠珠子上 → 环形进度 → 落点自动展开
+ *  15. P2-4 自定义配色    填自定义色板 → 一级分支真的换了色；非法输入不把画面弄成一片透明
+ *  16. 画布高度           auto/fixed/fill 三种模式各自的**可观察性质**：
+ *                         小图被下限抬起来（不再是「内容的影子」）、fixed 与内容解耦、
+ *                         fill 等于可用高、大图仍跟着长但封顶在可用高
  *
  * 全程用自己新建的临时文档，跑完删掉。
  *
@@ -95,14 +100,20 @@ async function makeDoc(title, markdown) {
 
 const docA = await makeDoc("画布增强", SMALL);
 const docB = await makeDoc("小地图", BIG);
+// 画布高度那一节要一张**确定够小**的图（判据是「内容高低于下限」），
+// 不能借 docA —— 前面几节会往它里面插节点、批量删了再撤销，结构随时会变。
+const docTiny = await makeDoc("画布高度", ["- 画布高度验证", "  - 子一", "  - 子二", "  - 子三", ""].join("\n"));
 
 const listA = (await kids(docA)).find((k) => k.type === "l").id;
 const listB = (await kids(docB)).find((k) => k.type === "l").id;
+const listTiny = (await kids(docTiny)).find((k) => k.type === "l").id;
 await api("/api/attr/setBlockAttrs", { id: listA, attrs: { "custom-mindmap": "logic" } });
 await api("/api/attr/setBlockAttrs", { id: listB, attrs: { "custom-mindmap": "logic" } });
+await api("/api/attr/setBlockAttrs", { id: listTiny, attrs: { "custom-mindmap": "logic" } });
 
 console.log(`小图文档 ${docA} · 列表 ${listA}`);
-console.log(`大图文档 ${docB} · 列表 ${listB}\n`);
+console.log(`大图文档 ${docB} · 列表 ${listB}`);
+console.log(`画布高度文档 ${docTiny} · 列表 ${listTiny}\n`);
 
 /* ---------------------------------------------------------------- 判据 */
 
@@ -976,6 +987,84 @@ try {
     const after = await page.eval(`${ROOT}.querySelector('.mm-world').style.transform`);
     ok(after !== jump.before, "点击小地图把视图跳过去了", `${jump.before} → ${after}`);
 
+    /* ============================================================ 16. 画布高度策略 */
+    console.log("\n[16] 画布高度：下限由用户说了算，上限仍守着「别把文档顶下去几屏」");
+
+    // ★ 定稿行为（2026-09-23）。老实现是 `clamp(内容高, 260, 可用高)` ——
+    //   **画布是「内容的影子」**：实测 4 个节点的图只有 280px（占编辑器区 36%），
+    //   49 个节点的图能到 688px（90%），同一块画布落差 2.46 倍、完全由内容决定。
+    //   用户的原话是「它似乎是根据节点的长度来逐步加大画布的」，字面上完全正确。
+    //
+    //   现在：**下限交给用户（`canvasHeight`），上限仍然守着「别把文档顶下去几屏」**。
+    //     · auto  —— clamp(内容高, 下限, 可用高)
+    //     · fixed —— 始终等于设定值
+    //     · fill  —— 始终等于可用高
+    //
+    //   ⚠️ 判据只写**可观察的性质**，不重抄一遍公式 —— 把公式抄进断言等于
+    //      「用我写的公式验证我写的公式」，两边一起错也照样绿。
+    const CANVAS = `(() => {
+        const root = ${ROOT};
+        if (!root) return { err: 'no root' };
+        const p = ${MM_PLUGIN};
+        const v = [...p.scanner.views.values()].find((x) => x.element === root);
+        if (!v) return { err: 'no view' };
+        return {
+            vpH: Math.round(root.querySelector('.mm-viewport').getBoundingClientRect().height),
+            worldH: Math.round(v.worldH),
+            avail: Math.round(v.availHeight()),
+            mode: v.options.canvasHeightMode,
+            want: v.options.canvasHeight,
+            nodes: root.querySelectorAll('.mm-node').length,
+        };
+    })()`;
+
+    // 小图（docTiny，4 个节点）—— 内容高远小于下限，正是「画布只有一小片」的那个场景
+    await openDoc(docTiny, "画布高度·小图");
+    const c0 = await page.eval(CANVAS);
+    ok(!c0.err, "小图上量得到画布尺寸", JSON.stringify(c0));
+    ok(c0.mode === "auto" && c0.want === 480, "默认是「自适应内容」+ 480px 下限", `${c0.mode} / ${c0.want}`);
+    ok(c0.worldH < 480, "这张小图的天然内容高确实低于下限（不然下面的判据是空气）", `内容高 ${c0.worldH} < 480`);
+    // ★ 用户诉求本身：小图也得有一块像样的场地
+    ok(c0.vpH === Math.min(480, c0.avail), "★ 小图画布被下限抬起来了（不再是「内容的影子」）", `画布 ${c0.vpH}px（旧实现只有 ${c0.worldH}px）`);
+    ok(c0.vpH > c0.worldH, "画布比内容高 —— 有留白，才像一块场地", `${c0.worldH} → ${c0.vpH}`);
+    ok(c0.vpH / c0.avail > 0.6, "小图画布占到可用高的六成以上", `${Math.round((c0.vpH / c0.avail) * 100)}%`);
+
+    // 下限可调：把下限压回 240，画布应当跟着变矮（证明它真的读了配置，不是写死的）
+    await setCfg({ canvasHeight: 240 });
+    await sleep(700);
+    const c1 = await page.eval(CANVAS);
+    ok(c1.vpH < c0.vpH, "把下限调到 240 之后画布变矮（配置真的生效了）", `${c0.vpH} → ${c1.vpH}`);
+    ok(c1.vpH === Math.min(Math.max(c1.worldH, 240), c1.avail), "下限 240 时画布回到「内容高与下限取大」", `${c1.vpH}px`);
+
+    // fixed：与内容高**解耦**。用同一张图验两次，中间改下限，高度都不该动。
+    await setCfg({ canvasHeightMode: "fixed", canvasHeight: 320 });
+    await sleep(700);
+    const c2 = await page.eval(CANVAS);
+    ok(c2.vpH === 320, "fixed 模式下画布正好是设定值", `${c2.vpH}px`);
+    ok(c2.vpH !== c1.vpH && c2.vpH !== c0.vpH, "fixed 的高度与 auto 下的两种取值都不同（模式真的换了）", `${c0.vpH} / ${c1.vpH} / ${c2.vpH}`);
+    await setCfg({ canvasHeight: 600 });
+    await sleep(700);
+    ok((await page.eval(CANVAS)).vpH === 600, "fixed 下改数字，高度跟着数字走（与内容无关）");
+
+    // fill：铺满可用高
+    await setCfg({ canvasHeightMode: "fill" });
+    await sleep(700);
+    const c3 = await page.eval(CANVAS);
+    ok(c3.vpH === c3.avail, "fill 模式下画布等于可用高", `${c3.vpH} = ${c3.avail}`);
+
+    // 复原成默认
+    await setCfg({ canvasHeightMode: "auto", canvasHeight: 480 });
+    await sleep(700);
+    ok((await page.eval(CANVAS)).vpH === c0.vpH, "改回默认后画布高度还原", `${c0.vpH}px`);
+
+    // 大图（docB）：内容高超过下限时**仍然会跟着长**，但封顶在可用高
+    await openDoc(docB, "画布高度·大图");
+    const c4 = await page.eval(CANVAS);
+    ok(c4.worldH > 480, "这张大图的天然内容高超过了下限（不然测不出「跟着长」）", `内容高 ${c4.worldH}`);
+    ok(c4.vpH > 480, "★ 内容多了画布仍然跟着长高（下限不是天花板）", `画布 ${c4.vpH}px > 下限 480px`);
+    ok(c4.vpH === c4.avail, "但封顶在可用高 —— 「别把文档顶下去几屏」这条守住了", `${c4.vpH} = ${c4.avail}`);
+    ok(c4.vpH <= c4.avail, "任何模式下画布都不会超过可用高", `${c4.vpH} ≤ ${c4.avail}`);
+
     /* ============================================================ 收尾 */
     const errs = await page.eval("window.__mmErrors || []");
     ok(errs.length === 0, "全程没有页面级报错", errs.length ? JSON.stringify(errs.slice(0, 3)) : "");
@@ -983,6 +1072,7 @@ try {
     await chrome.close();
     await removeDoc(api, docA);
     await removeDoc(api, docB);
+    await removeDoc(api, docTiny);
 }
 
 console.log("");

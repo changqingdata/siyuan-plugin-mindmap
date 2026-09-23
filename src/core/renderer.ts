@@ -151,6 +151,15 @@ const MINIMAP_MIN_NODES = 30;
 const MINIMAP_MAX_RECTS = 700;
 
 /**
+ * 画布高度的绝对下限：比这更矮就不像一块画布了。
+ *
+ * 和 `MINIMAP_MIN_NODES` 是同一个套路 —— 常量负责兜底，配置负责让用户说了算。
+ */
+const CANVAS_MIN_H = 240;
+/** 配置缺失 / 非法时的画布高度兜底（与 `DEFAULT_CONFIG.canvasHeight` 一致） */
+const CANVAS_DEFAULT_H = 480;
+
+/**
  * 「单独按下的修饰键」—— 这些 keydown 导图没有动作可做，但它们会让思源的编辑器
  * 把焦点抢走（见 `handleGlobalKey` 里的长注释）。判定时必须把它们也当成
  * 「要抢回焦点」的情形，否则真实键盘下的 Ctrl+字母 全部收不到。
@@ -2777,12 +2786,48 @@ export class MindMapView {
         this.flipHandle = requestAnimationFrame(step);
     }
 
+    /**
+     * 画布该多高。
+     *
+     * ⚠️ 这里的数字同时承担两件事，所以必须分开看：
+     *   · **可视区高度** —— 用户能看见多少
+     *   · **文档占位高度** —— 这篇文档要滚多久
+     *
+     * 老实现把两者绑在一个数字上（`clamp(内容高, 260, 可用高)`），于是
+     * **「内容少」这一侧被误伤**：实测（窗口 1584×905，编辑器区 768，可用高 688）
+     *
+     * | 场景 | 画布高 | 占编辑器区 |
+     * | --- | --- | --- |
+     * | 4 个节点 | 280px | 36% |
+     * | 49 个节点 | 688px | 90% |
+     *
+     * 同一块画布落差 **2.46 倍**，而且完全由内容决定 —— 用户的原话是
+     * 「它似乎是根据节点的长度来逐步加大画布的」，字面上完全正确。
+     *
+     * 现在改成：**下限交给用户（`canvasHeight`），上限仍然守着「别把文档顶下去几屏」**。
+     *
+     *   · `auto`  —— `clamp(内容高, 下限, 可用高)`：小图也有一块像样的场地，大图仍封顶
+     *   · `fixed` —— 始终等于设定值，与内容无关
+     *   · `fill`  —— 始终等于可用高，铺满编辑器可视区
+     *
+     * 注意 `fill` 用的是 `availHeight()`（窗口的 76%）而不是 `clientHeight`：
+     * 后者正是本函数上一轮写进去的值，拿它当输入会形成自激。
+     */
+    private canvasHeightFor(contentH: number, avail: number): number {
+        const mode = this.options.canvasHeightMode;
+        if (mode === "fill") return avail;
+        const raw = Number(this.options.canvasHeight);
+        const want = Math.min(Math.max(Number.isFinite(raw) && raw > 0 ? raw : CANVAS_DEFAULT_H, CANVAS_MIN_H), avail);
+        if (mode === "fixed") return want;
+        return Math.min(Math.max(contentH, want), avail);
+    }
+
     /** 按内容高度调整可视区，返回是否发生了变化 */
     private resizeViewport(contentH: number): boolean {
         // 行内视图要按内容高度自适应，并封顶 —— 否则一个 200 节点的列表块会把
         // 整篇文档顶下去几屏。全屏弹层 / 并排面板里画布就是容器本身，直接铺满。
         const avail = this.availHeight();
-        const h = Math.min(Math.max(contentH, 260), avail);
+        const h = this.canvasHeightFor(contentH, avail);
         const prev = parseFloat(this.viewportEl.style.height || "0");
         if (Math.abs(prev - h) < 1) return false;
         this.viewportEl.style.height = `${Math.round(h)}px`;

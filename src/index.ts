@@ -2,7 +2,7 @@ import { Dialog, Menu, Plugin, Setting, openTab, showMessage } from "siyuan";
 import type { IMenu, subMenu } from "siyuan";
 
 import { ATTR_LEGACY_VIEW, ATTR_VIEW, DEFAULT_CONFIG } from "./types";
-import type { MMConfig, MMLayout, MMThemeId, MMEdgeStyle } from "./types";
+import type { MMConfig, MMLayout, MMThemeId, MMEdgeStyle, MMCanvasHeightMode } from "./types";
 import { Scanner } from "./core/scanner";
 import { MindMapView } from "./core/renderer";
 import { copyText, getKernelVersion, searchDocOutline, setBlockAttrs } from "./utils/api";
@@ -860,6 +860,31 @@ export default class MindMapPlugin extends Plugin {
         addToggle(this.t("set.autoFit", "自动适应画布"), this.t("set.autoFitDesc", "渲染完成后自动缩放到刚好铺满可视区"), this.config.autoFit, (v) => {
             draft.autoFit = v;
         });
+
+        addSelect(
+            this.t("set.canvasHeightMode", "画布高度"),
+            this.t("set.canvasHeightModeDesc", "行内导图的高度同时决定「看得见多少」和「这篇文档要多滚几屏」，所以给了三种取法：自适应内容会跟着节点多少长高；固定高度始终一样；铺满可用高度用满编辑器可视区。"),
+            {
+                auto: this.t("set.canvasHeightAuto", "自适应内容（推荐）"),
+                fixed: this.t("set.canvasHeightFixed", "固定高度"),
+                fill: this.t("set.canvasHeightFill", "铺满可用高度"),
+            },
+            this.config.canvasHeightMode,
+            (v) => {
+                draft.canvasHeightMode = v as MMCanvasHeightMode;
+            },
+        );
+
+        addNumber(
+            this.t("set.canvasHeight", "画布高度（px）"),
+            this.t("set.canvasHeightDesc", "「自适应内容」下这是最小高度（节点少时也留这么高），「固定高度」下就是它本身的高度；「铺满可用高度」忽略此项。"),
+            this.config.canvasHeight,
+            240,
+            1200,
+            (v) => {
+                draft.canvasHeight = v;
+            },
+        );
 
         addToggle(
             this.t("set.autoColumns", "逻辑图自动分列"),

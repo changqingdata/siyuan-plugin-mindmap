@@ -8,6 +8,25 @@ export type MMLayout = "logic" | "mind" | "tree";
 /** 连线样式 */
 export type MMEdgeStyle = "curve" | "elbow" | "straight";
 
+/**
+ * 画布高度策略。
+ *
+ * 行内视图里「画布高度」同时承担两件事：**可视区高度**（用户看得见多少）
+ * 和 **文档占位高度**（这篇文档要滚多久）。老实现把两者绑在一个数字上
+ * （`clamp(内容高, 260, 可用高)`），于是「内容少」这一侧被误伤 ——
+ * 实测 4 个节点的图画布只有 280px（占编辑器区 36%），而 49 个节点的图能到
+ * 688px（90%），同一块画布落差 2.46 倍、完全由内容决定。
+ *
+ * 拆开之后：**下限交给用户，上限仍然守着「别把文档顶下去几屏」**。
+ */
+export type MMCanvasHeightMode =
+    /** 内容少时保底 `canvasHeight`，内容多了跟着长（不超过可用高）。默认 */
+    | "auto"
+    /** 始终 `canvasHeight`，与内容无关 */
+    | "fixed"
+    /** 始终等于可用高，铺满编辑器可视区 */
+    | "fill";
+
 /** 节点语义类型 */
 export type MMNodeKind = "bullet" | "ordered" | "task" | "heading" | "other";
 
@@ -242,6 +261,14 @@ export interface MMConfig extends MMRenderOptions {
     wheelPan: boolean;
     /** 自动适应画布 */
     autoFit: boolean;
+    /** 画布高度策略，见 `MMCanvasHeightMode` */
+    canvasHeightMode: MMCanvasHeightMode;
+    /**
+     * 画布高度（px）。
+     * `auto` 模式下这是**下限**（内容少了也不会比它矮）；`fixed` 模式下就是它的高度；
+     * `fill` 模式下忽略。
+     */
+    canvasHeight: number;
     /** 允许在导图内双击改名并回写内核 */
     editable: boolean;
     /** 允许拖拽节点调整位置与层级 */
@@ -302,6 +329,13 @@ export const DEFAULT_CONFIG: MMConfig = {
     ctrlWheelZoom: true,
     wheelPan: false,
     autoFit: true,
+    canvasHeightMode: "auto",
+    /**
+     * 480 是实测挑出来的：编辑器区 768px 时它占 62%，够像一块画布；
+     * 而 4 个节点图的天然内容高只有 280px（占 36%）—— 那才是「一条横幅」的由来。
+     * 再往上加就要开始权衡文档占位了，所以留给用户自己调。
+     */
+    canvasHeight: 480,
     editable: true,
     draggable: true,
     lazyRender: true,

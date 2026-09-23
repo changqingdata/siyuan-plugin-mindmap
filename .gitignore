@@ -16,6 +16,30 @@ src/generated/
 /i18n/
 /package.zip
 
+# 测试脚手架的全部产物（esbuild 打包、验证页、探针截图）
+#
+# 这里**没有一个文件是输入**，全是每次跑套件都会重新生成的东西：
+#   · `entry.mjs`    —— tests/run.mjs 打包出来的单测入口
+#   · `visual.html` / `visual.js` —— tests/visual.mjs 生成的验证页
+#   · `*.png`        —— 各支真机探针的截图（`ux:*` / `probe:*` / `diag-*`）
+#   · `dump.html`、`probe-png-export.svg` 等一次性证据
+#
+# 唯一的「读」是 `ux:visual`（tests/kernel/diag-visual.mjs）加载 `visual.html`，
+# 而它自己就会提示「先跑 npm run visual」—— 顺序依赖本来就存在，不是靠入库解决的。
+#
+# ⚠️ 曾经把它们入库，代价是 73 个 PNG 约 46 MB，且**每跑一次套件就有 20 多个被改写**
+# → 每次 `git add -A` 都在提交一堆二进制噪声，仓库无谓地涨。
+# 截图是给人当场看的，看完即弃，不该进版本库。
+#
+# ⚠️⚠️ 但**目录本身必须留着**（所以是 `/*` + 反选 `.gitkeep`，不是 `/tests/.build/`）。
+# 有 17 个脚本会写截图却**不自建目录**（diag-commands / diag-settings /
+# probe-settings-persist / cdp.mjs 等），它们以前能跑纯粹是因为目录被入库文件撑着。
+# 直接忽略整个目录 → 全新 clone 里没有 `tests/.build/` → 这些探针一写截图就挂。
+# 实测：`diag-canvas-v2` 在目录缺失时仍 99/99（它那支恰好没写截图），
+# 所以「跑一支不报错」证明不了安全 —— 要按「谁写了 screenshot()」来排查。
+/tests/.build/*
+!/tests/.build/.gitkeep
+
 # 编辑器
 .vscode/
 .idea/
