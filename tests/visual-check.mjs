@@ -186,6 +186,45 @@ for (const k of report.keyboard) {
     ok(k.name, k.ok, k.detail);
 }
 
+/* ---- 回调接线 ----
+ *
+ * 产品侧陆续加了回调（`onBatchAction` / `onMarkChange` / `onViewPrefs` /
+ * `onOpenBlock` / `onEditInSource`），验证页却一直没接 —— 直到给 `tests/**`
+ * 加上类型检查才报出来（`is missing the following properties from type 'ViewCallbacks'`）。
+ *
+ * 接上之后如果只是记进数组、不进报告，那还是「看不见」。
+ * 这一段把「接上了」升级成「验过了」：字段在不在、探针有没有真的触发它们。
+ */
+console.log("\n[回调]");
+const cb = report.callbacks;
+if (Array.isArray(cb)) {
+    for (const c of cb) {
+        console.log(
+            `  视图 ${c.view}  动作 ${c.actions.length}  折叠 ${c.folds.length}  ` +
+                `撤销/重做 ${c.history.length}  改名 ${c.renames}  布局 ${c.layouts.length}`,
+        );
+    }
+}
+ok(
+    "回调汇总随报告一起 dump 出来",
+    Array.isArray(cb) && cb.length === report.views.length,
+    `callbacks=${Array.isArray(cb) ? `${cb.length} 条` : typeof cb}，views=${report.views.length}`,
+);
+if (Array.isArray(cb) && cb.length) {
+    // 13 个字段一个都不能少 —— 少一个就说明「产品加了、验证页又没接」的历史重演了
+    const WIRED = [
+        "actions", "folds", "renames", "layouts", "locateIds", "fullscreen", "exits",
+        "history", "batch", "marks", "prefs", "opened", "editInSource",
+    ];
+    const missing = WIRED.filter((k) => !(k in cb[0]));
+    ok("13 个回调字段都在报告里", missing.length === 0, `缺 ${missing.join(", ")}`);
+
+    // 光有字段不够，得证明键盘探针真的走到过这几条路径
+    ok("键盘探针触发了折叠回调", cb.some((c) => c.folds.length > 0), JSON.stringify(cb.map((c) => c.folds.length)));
+    ok("键盘探针触发了撤销/重做回调", cb.some((c) => c.history.length > 0), JSON.stringify(cb.map((c) => c.history.length)));
+    ok("键盘探针触发了结构操作回调", cb.some((c) => c.actions.length > 0), JSON.stringify(cb.map((c) => c.actions.length)));
+}
+
 /* ------------------------------------------------------------ 截图 */
 
 const shots = [

@@ -1,6 +1,6 @@
 import type { MMDropPosition, MMNode } from "../types";
 import type { InsertBlockOptions } from "../utils/api";
-import { deleteBlock, insertBlock, moveBlock, updateBlock } from "../utils/api";
+import { deleteBlock, insertBlock, moveBlock, setTaskMarker, setTaskMarkers, updateBlock } from "../utils/api";
 import { escapeMd, indexInParent, isAncestor, newItemMarkdown, serializeSubtree } from "./tree";
 
 /**
@@ -189,6 +189,23 @@ export async function pasteNode(node: MMNode, markdown: string): Promise<boolean
     return (await insertBlock({ data, ...place })) !== null;
 }
 
+/**
+ * 把待办节点写成指定的勾选态。
+ *
+ * 只认 `kind === "task"` —— 普通列表项没有勾选态可言，
+ * 菜单那边也会按这个条件禁用，所以这里返回 false 属于「不该发生」，
+ * 交给上层的红边反馈即可。
+ *
+ * **收的是目标态，不是「切换」**：渲染层为了做乐观 UI，在派发动作之前
+ * 已经把 `node.checked` 翻成了目标态，这里若再 `!node.checked` 反推，
+ * 两次取反就等于把原值写回去 —— 点一下变成一次原地踏步的空写，
+ * 界面勾上了、内核纹丝不动（`probe-click-timeline.mjs` 抓到的就是这个）。
+ */
+export async function toggleTaskCheck(node: MMNode, checked: boolean): Promise<boolean> {
+    if (!node.id || node.kind !== "task") return false;
+    return setTaskMarker(node.id, checked);
+}
+
 /* ==================================================================== 批量 */
 
 /**
@@ -245,4 +262,23 @@ export async function deleteNodes(nodes: MMNode[]): Promise<MMNode[]> {
         if (!n.id || !(await deleteBlock(n.id))) failed.push(n);
     }
     return failed;
+}
+
+/**
+ * 批量勾选 / 取消勾选。
+ *
+ * 与折叠、删除不同，这一条**不用逐条调** —— 内核有 `batchUpdateTaskListItemMarker`，
+ * 一次往返就是一次事务，天生满足「整体成功或整体回滚」，不需要上层拿快照兜底。
+ *
+ * 非任务节点直接跳过、且**不算失败**：选中一堆普通节点和几个待办一起勾，
+ * 是很自然的操作，不该报错。
+ */
+export async function setTaskChecks(nodes: MMNode[], checked: boolean): Promise<MMNode[]> {
+    const targets = nodes.filter((n) => n.kind === "task" && n.id);
+    if (targets.length === 0) return [];
+    const ok = await setTaskMarkers(
+        targets.map((n) => n.id),
+        checked,
+    );
+    return ok ? [] : targets;
 }

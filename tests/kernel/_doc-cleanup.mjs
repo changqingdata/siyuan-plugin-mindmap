@@ -35,18 +35,42 @@
 export async function removeDoc(api, id) {
     if (!id) return false;
     const info = await api("/api/filetree/getPathByID", { id }).catch(() => null);
-    const notebook = info?.data?.notebook;
-    const path = info?.data?.path;
-    if (!notebook || !path) {
-        // 退一步：有些版本确实认 id。试一下，但**不要**吞掉错误信息
-        const fallback = await api("/api/filetree/removeDoc", { id }).catch(() => null);
-        if (fallback?.code === 0) return true;
-        console.warn(`[cleanup] 删文档失败 ${id}：拿不到 notebook/path`, info?.msg ?? "");
+    /* ⚠️ 各脚本的 `api()` 封装有**两种约定**，这个助手必须两种都认：
+     *
+     *   完整响应型：`return res.json()`      → { code, msg, data }
+     *   已解包型  ：`return json.data`       → 直接就是 data
+     *
+     * 原来是只认完整响应的写法（`info?.data?.notebook`），于是
+     * `live.mjs`（解包型）这里恒为 undefined → 走 fallback → 也失败 →
+     * 清理静默失效。实测由 `npm run e2e:all` 抓到（live / live:gpu 各漏一个文档）。
+     *
+     * 判据：`info?.data ?? info` —— 完整响应取 .data，解包型原样用。
+     * 两种约定的 `data` 层字段名一致（notebook / path），所以到这里就统一了。
+     */
+    const payload = info?.data ?? info;
+    const notebook = payload?.notebook;
+    const path = payload?.path;
+    if (notebook && path) {
+        // 删成功的判定也要兼容两种：完整响应看 code === 0；
+        // 解包型成功返回 null（removeDoc 的 data 就是 null）、失败则**抛异常**。
+        // 所以「没抛 且（无返回值 或 code===0）」才算成功。
+        let threw = false;
+        const out = await api("/api/filetree/removeDoc", { notebook, path }).catch(() => {
+            threw = true;
+            return null;
+        });
+        if (!threw && (out == null || out?.code === 0)) return true;
+        console.warn(`[cleanup] 删文档失败 ${id}：${out?.msg ?? "(抛异常/无响应)"}`);
         return false;
     }
-    const out = await api("/api/filetree/removeDoc", { notebook, path }).catch(() => null);
-    if (out?.code === 0) return true;
-    console.warn(`[cleanup] 删文档失败 ${id}：${out?.msg ?? "(无响应)"}`);
+    // 退一步：有些版本确实认 id。试一下，但**不要**吞掉错误信息
+    const fallback = await api("/api/filetree/removeDoc", { id }).catch(() => null);
+    if (fallback == null || fallback?.code === 0) {
+        // ⚠️ 解包型下「返回 null」既可能是成功、也可能是抛异常被吞 ——
+        //    这里按成功记，但把这条路径的不可判定性写出来，免得以后当成「一定成功」。
+        return true;
+    }
+    console.warn(`[cleanup] 删文档失败 ${id}：拿不到 notebook/path`, info?.msg ?? "");
     return false;
 }
 

@@ -8,13 +8,16 @@ import type {
     MMConfig,
     MMDropPosition,
     MMEdgeStyle,
+    MMFilter,
     MMLayout,
     MMNode,
+    MMNodeMark,
+    MMSearchHit,
     MMTheme,
     MMThemeId,
     MMViewPrefs,
 } from "../types";
-import { EDIT_FLAG } from "../types";
+import { EDIT_FLAG, FILTER_LABEL } from "../types";
 import { applyTheme, hexA, mixHex, readRgb, resolveTheme, THEME_LIST } from "./theme";
 import { decorate, flatten, indexById, parseList, wrapRoot } from "./parser";
 import { layout } from "./layout";
@@ -33,10 +36,21 @@ import {
     isAncestor,
     NEW_NODE_TEXT,
     serializeSubtree,
+    shownChildren,
 } from "./tree";
-import { copyText } from "../utils/api";
+import { copyText, scrollToBlock } from "../utils/api";
+import { hasMark, MARK_COLORS, MARK_ICONS, MARK_LABEL_MAX, sameMark } from "./marks";
 
 export interface ViewCallbacks {
+    /**
+     * i18n 词表（可选）。视图里所有「用户可见文案」都从这里取，
+     * 取不到就回退到内置中文 —— 缺词表时行为与以前**完全一致**。
+     *
+     * 为什么挂在 `cb` 上而不是 `options`：`options`（`MMConfig`）是**用户配置**，
+     * 会被写进块属性、跟着文档走；词表是**运行时环境**，两者生命周期不同。
+     * 挂成可选字段还有个好处：三个构造点只需在字面量里补一行，不影响既有调用。
+     */
+    i18n?: Record<string, string>;
     /**
      * 折叠状态变了，交给外部**写回大纲**（思源原生 `fold`）。
      *
@@ -82,6 +96,21 @@ export interface ViewCallbacks {
      * 返回 false 表示自己的栈是空的，Ctrl+Z 应该继续冒泡给思源自己的撤销栈。
      */
     onHistory: (redo: boolean) => boolean;
+    /**
+     * 节点标记变了（P1-2）。
+     *
+     * 传 `null` 表示**清除标记**（外部应当把块属性删掉，而不是写成空串）。
+     * 写回走块属性 `custom-mindmap-mark` —— 视图自己不存，见 `core/marks.ts`。
+     */
+    onMarkChange: (node: MMNode, mark: MMNodeMark | null) => void;
+    /**
+     * 跨图搜索（P1-1）：在这篇文档的**所有导图列表**里找节点。
+     *
+     * 交给外部实现，是因为视图手里只有自己这一个列表块 ——
+     * 「文档里还有哪些列表是导图」这件事得靠内核查（见 `searchDocOutline`）。
+     * 没实现就退回「只搜本图」。
+     */
+    onSearchDoc?: (q: string) => Promise<MMSearchHit[]>;
 }
 
 /** 拖拽落点：上缘 / 下缘判定为同级插入，中间判定为成为子节点 */
@@ -97,10 +126,28 @@ const HOVER_EXPAND_DELAY = 420;
 const AUTO_SCROLL_MARGIN = 34;
 const AUTO_SCROLL_SPEED = 9;
 
+/**
+ * 画布内边距（世界坐标）：`layout()` 会把它加到内容包围盒的两侧。
+ *
+ * ⚠️ `fit()` 的取景钳制必须减掉它。`frameAxis` 钳的是**画布**边缘，
+ * 而用户看到的是**内容**边缘 —— 两者之间差着这份内边距。
+ * 不减的话，内容边缘会白白多让出 `pad × scale` 的空白（实测 72 × 0.55 ≈ 40px），
+ * 左右各一份，可读优先模式下可视区被吃掉两成半。
+ */
+const LAYOUT_PAD_X = 72;
+const LAYOUT_PAD_Y = 64;
+
 /** 小地图最少节点数。低于这个数「一眼能看完」，再挂个缩略图纯属占地方 */
 const MINIMAP_MIN_NODES = 30;
 /** 小地图最多画多少个矩形，超过就抽样 */
 const MINIMAP_MAX_RECTS = 700;
+
+/**
+ * 「单独按下的修饰键」—— 这些 keydown 导图没有动作可做，但它们会让思源的编辑器
+ * 把焦点抢走（见 `handleGlobalKey` 里的长注释）。判定时必须把它们也当成
+ * 「要抢回焦点」的情形，否则真实键盘下的 Ctrl+字母 全部收不到。
+ */
+const MODIFIER_ONLY_KEYS = new Set(["Control", "Alt", "Shift", "Meta", "AltGraph"]);
 
 const LAYOUT_LABEL: Record<MMLayout, string> = {
     logic: "逻辑结构图",
@@ -127,6 +174,9 @@ const GHOST_LABEL: Record<string, string> = {
     move: "移动中…",
     moveUp: "上移中…",
     moveDown: "下移中…",
+    toggleCheck: "勾选中…",
+    check: "勾选中…",
+    uncheck: "取消中…",
 };
 
 /** 批量操作成功后的提示 */
@@ -136,6 +186,8 @@ const BATCH_DONE_LABEL: Record<string, string> = {
     delete: "已删除选中节点（Ctrl+Z 可撤销）",
     fold: "已折叠选中节点",
     unfold: "已展开选中节点",
+    check: "已勾选选中的待办",
+    uncheck: "已取消勾选选中的待办",
 };
 
 const MIN_SCALE = 0.15;
@@ -297,6 +349,13 @@ export class MindMapView {
 
     private listEl: HTMLElement;
     private options: MMConfig;
+    /**
+     * 全局默认里「可被文档级偏好覆盖」的那三项。
+     *
+     * `恢复本列表的默认视图` 必须靠它把 `options` 拉回去 —— 光清 `prefs` 是不够的，
+     * 原因见 `resetToGlobal()` 的注释。
+     */
+    private globalDefaults: { layout: MMLayout; theme: MMThemeId; edge: MMEdgeStyle };
     private cb: ViewCallbacks;
     /**
      * 折叠覆盖表（**活引用**，每次 render 现读）。
@@ -364,6 +423,52 @@ export class MindMapView {
     private searchHits: string[] = [];
     private searchIdx = -1;
     private searchOpen = false;
+
+    /* -------------------------------------------------- 过滤器（P1-1） */
+
+    /**
+     * 当前状态过滤器。
+     *
+     * **只活在内存里**，不写进文档偏好 —— 「我瞄一眼还有哪些没做完」是一次浏览行为，
+     * 不该变成下次打开这张图的默认样子。要持久的是视图偏好（布局 / 缩放），不是筛选。
+     */
+    private filter: MMFilter = "all";
+    /** 工具条上那组 chip，用来同步高亮 / 显隐 */
+    private filterEls: HTMLButtonElement[] = [];
+    /** 装了过滤器的那个分组 —— 整张图一个待办都没有时整组藏起来 */
+    private filterGroup!: HTMLElement;
+    /** 上一轮过滤命中了几项 —— 用来在「筛完是空的」时说一句人话 */
+    private filterHits = 0;
+
+    /* -------------------------------------------------- 节点标记（P1-2） */
+
+    /** 打开着的标记浮层。跟着节点走，所以只记 ID，重渲染后按 ID 重新定位 */
+    private markPop: HTMLElement | null = null;
+    private markPopId = "";
+    /**
+     * 标记覆盖表（**活引用**，每次 render 现读）。
+     *
+     * 写块属性到内核把 DOM 推回来之间有几百毫秒。这段空窗里任何一次重渲染
+     * 都会按**旧属性**解析，刚设好的标记会「闪一下再回来」。
+     * 与折叠同步（`getFoldOverlay`）是同一个套路：先给结果，再等真相。
+     * 每项带 3 秒超时 —— 写失败了就让它消失，别留一个永远不会成真的假象。
+     */
+    private markOverlay = new Map<string, MMNodeMark | null>();
+
+    /* -------------------------------------------------- 跨图搜索（P1-1） */
+
+    /** 搜索范围是不是「本文档所有导图」 */
+    private searchAll = false;
+    private scopeBtn!: HTMLButtonElement;
+    /** 跨图搜索的结果面板 */
+    private resultsEl!: HTMLElement;
+    /** 最近一次跨图搜索的命中，点结果时按 id 取 */
+    private docHits: MMSearchHit[] = [];
+    /** 跨图搜索的防抖句柄 —— 每敲一个字都打一次 SQL 太浪费 */
+    private docSearchTimer = 0;
+    /** 请求序号：只认最后一次的返回，防止慢的请求盖掉快的 */
+    private docSearchSeq = 0;
+
     /** 小地图缩放比，更新视口框时复用 */
     private minimapK = 1;
     /**
@@ -423,6 +528,14 @@ export class MindMapView {
     /* --- 批量操作条（P0-1） --- */
     private batchEl: HTMLElement | null = null;
     private batchCountEl: HTMLElement | null = null;
+    /**
+     * 批量条上的「完成 / 取消」按钮。
+     *
+     * 操作条是**建一次复用**的，但这两个按钮只对「选中里含待办」的场合有意义 ——
+     * 全是普通段落时它们必须消失，否则点下去只会得到一句「没有待办项」。
+     * 所以存下引用，在每次刷新时按选区内容切换显隐。
+     */
+    private batchCheckEls: HTMLElement[] = [];
 
     /* --- 悬停预览（P1-1） --- */
     private previewEl: HTMLElement | null = null;
@@ -467,6 +580,8 @@ export class MindMapView {
     ) {
         this.listEl = listEl;
         this.options = { ...options };
+        // 构造时传进来的就是全局配置快照 —— 当作「全局默认」的初值
+        this.globalDefaults = { layout: options.layout, theme: options.theme, edge: options.edge };
         this.getFoldOverlay = getFoldOverlay;
         this.cb = cb;
 
@@ -500,7 +615,7 @@ export class MindMapView {
 
         this.emptyEl = document.createElement("div");
         this.emptyEl.className = "mm-empty";
-        this.emptyEl.innerHTML = "<strong>这里还没有内容</strong><span>在列表里添加条目，导图会实时同步</span>";
+        this.emptyEl.innerHTML = this.t("ui.emptyHint", "<strong>这里还没有内容</strong><span>在列表里添加条目，导图会实时同步</span>");
 
         this.zoomBarEl = document.createElement("div");
         this.zoomBarEl.className = "mm-zoombar";
@@ -550,6 +665,7 @@ export class MindMapView {
         this.hidePreview();
         this.hideBatchBar();
         this.hidePresentBar();
+        this.closeMarkPopover();
         this.clearOutlineCursor();
         this.tipEl?.remove();
         this.tipEl = null;
@@ -584,6 +700,28 @@ export class MindMapView {
         return this.rootEl;
     }
 
+    /**
+     * 给「复制诊断信息」用的一行状态摘要（P1-5）。
+     *
+     * 只报**事实**，不做任何格式化排版 —— 排版归 diagnostics 那边管，
+     * 这里多写一个冒号都会变成两处要同步的格式。
+     */
+    diagLine() {
+        return {
+            mode: this.mode,
+            listId: this.listEl.dataset.nodeId ?? "",
+            nodes: this.nodeCount,
+            layout: this.options.layout,
+            theme: this.options.theme,
+            edge: this.options.edge,
+            branchColor: this.options.branchColor ? "on" : "off",
+            scale: Math.round(this.scale * 100),
+            filter: this.filter,
+            selected: (this.selected ? 1 : 0) + this.extraSel.size,
+            drill: this.drillPath.length,
+        };
+    }
+
     /** 被渲染的源列表元素 */
     get source() {
         return this.listEl;
@@ -615,8 +753,32 @@ export class MindMapView {
         this.rootEl.focus({ preventScroll: true });
     }
 
+    /**
+     * 取一条用户可见文案：优先用外部注入的 i18n 词表，取不到回退到内置中文。
+     *
+     * 之所以要这个方法、而不是把 `this.cb.i18n?.x || "中文"` 散落到各处：
+     * ① 回退逻辑只写一次；② 将来若要做「词表缺键时告警」也只有一处要改。
+     *
+     * ⚠️ 只覆盖**用户可见**的文案。控制台日志、内核报错回显**不进** i18n ——
+     * 那些是给开发者看的，进词表只会徒增翻译负担（见 docs 第二十节的三层分类）。
+     */
+    private t(key: string, fallback: string, vars?: Record<string, string | number>): string {
+        const v = this.cb.i18n?.[key];
+        let s = typeof v === "string" && v ? v : fallback;
+        // 占位符模板（`{n}` / `{text}`）。**带变量的提示语必须走模板** ——
+        // 把「已导出」和「选中的 N 个节点」拼起来，中文下看不出问题，
+        // 英文下会得到 "Exported选中的 3 个节点" 这种中英混搭的句子。
+        if (vars) for (const [k, val] of Object.entries(vars)) s = s.split(`{${k}}`).join(String(val));
+        return s;
+    }
+
     /** 只更新渲染参数，不重建视图 */
     setOptions(options: Partial<MMConfig>) {
+        // 顺手把「全局默认」更新一遍 —— `refreshAll()` 传进来的是完整全局配置。
+        // 用户在设置面板里改了全局主题之后，`恢复本列表的默认视图` 要回到**新的**全局默认。
+        if (options.layout) this.globalDefaults.layout = options.layout;
+        if (options.theme) this.globalDefaults.theme = options.theme;
+        if (options.edge) this.globalDefaults.edge = options.edge;
         Object.assign(this.options, options);
         this.syncToolbar();
         this.render(true);
@@ -663,6 +825,41 @@ export class MindMapView {
         this.cb.onViewPrefs({ ...this.prefs });
     }
 
+    /**
+     * 清空文档级偏好，并把被偏好覆盖过的三项**显式**拉回全局默认。
+     *
+     * ## ⚠️ 为什么不能只调 `applyViewPrefs({})`
+     *
+     * `applyViewPrefs` 的语义是「用偏好**覆盖**全局默认」，所以它是
+     * `if (prefs.layout) this.options.layout = prefs.layout;` 这样写的 ——
+     * **只覆盖显式给出的项**。传空对象进去，它一项都不覆盖。
+     *
+     * 于是「恢复本列表的默认视图」原来这么写就废了：
+     *
+     * ```ts
+     * for (const k of Object.keys(this.prefs)) this.forgetPref(k);   // prefs 清空 ✓
+     * this.applyViewPrefs({});                                       // options 纹丝不动 ✗
+     * this.render(true);                                             // 画出来还是旧布局
+     * ```
+     *
+     * 结果：块属性里的偏好确实被删干净了（下次打开这个列表会回到默认），
+     * 但**当前画面一点变化都没有**，而 toast 已经说了「已恢复默认视图」——
+     * 一个会说谎的提示，比什么都不做更糟。
+     *
+     * 这个语义本身没错（`applyViewPrefs` 就该只覆盖显式项），
+     * 错在「恢复默认」这个动作少了一半：它既要**清掉覆盖**，也要**把覆盖层撤掉**。
+     */
+    private resetToGlobal() {
+        this.prefs = {};
+        this.prefsDirty.clear();
+        this.options.layout = this.globalDefaults.layout;
+        this.options.theme = this.globalDefaults.theme;
+        this.options.edge = this.globalDefaults.edge;
+        this.syncToolbar();
+        // fitView：记住的缩放也一并作废，重新取景才是「默认视图」该有的样子
+        this.render(true);
+    }
+
     /* ==================================================================== 工具条 */
 
     private buildToolbar() {
@@ -673,8 +870,10 @@ export class MindMapView {
             const b = document.createElement("button");
             b.type = "button";
             b.dataset.layout = key;
-            b.textContent = LAYOUT_LABEL[key];
-            b.dataset.mmTip = LAYOUT_LABEL[key];
+            // 布局名走 i18n（键名约定：layout + 首字母大写，如 logic → layoutLogic）
+            const layoutLabel = this.t(`layout.${key}`, LAYOUT_LABEL[key]);
+            b.textContent = layoutLabel;
+            b.dataset.mmTip = layoutLabel;
             b.onclick = (e) => {
                 e.stopPropagation();
                 this.options.layout = key;
@@ -693,19 +892,45 @@ export class MindMapView {
         const foldGroup = document.createElement("div");
         foldGroup.className = "mm-group";
         foldGroup.append(
-            this.mkToolBtn("fold", "折叠全部", () => this.foldAll(true)),
-            this.mkToolBtn("unfold", "展开全部", () => this.foldAll(false)),
+            this.mkToolBtn("fold", this.t("tip.foldAll", "折叠全部"), () => this.foldAll(true)),
+            this.mkToolBtn("unfold", this.t("tip.unfoldAll", "展开全部"), () => this.foldAll(false)),
         );
+
+        /* ---- 状态过滤（P1-1）----
+         * 放在工具条上而不是搜索框里：「只看未完成」是任务列表场景的高频动作，
+         * 要求先按 Ctrl+F 打开搜索框再点一下，等于把这个功能藏起来了。
+         * 整张图一个待办都没有时，`syncFilterGroup()` 会把这一组整个收掉 ——
+         * 不是任务列表的导图不该平白多出三个永远无效的按钮。 */
+        this.filterGroup = document.createElement("div");
+        this.filterGroup.className = "mm-group mm-filters";
+        this.filterEls = (["all", "todo", "done"] as MMFilter[]).map((key) => {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.dataset.filter = key;
+            b.textContent = this.t(`filter.${key}`, FILTER_LABEL[key]);
+            // 提示单独给键：`只看${FILTER_LABEL[key]}的待办` 是拼接式，英文下会混搭
+            b.dataset.mmTip =
+                key === "all"
+                    ? this.t("tip.filterAll", "显示全部节点")
+                    : this.t(`tip.filter.${key}`, `只看${FILTER_LABEL[key]}的待办`);
+            b.onclick = (e) => {
+                e.stopPropagation();
+                this.setFilter(key);
+            };
+            this.filterGroup.appendChild(b);
+            return b;
+        });
+        this.filterGroup.style.display = "none";
 
         const actGroup = document.createElement("div");
         actGroup.className = "mm-group";
-        actGroup.append(this.mkToolBtn("search", "搜索节点", () => this.toggleSearch(), "Ctrl F"));
-        actGroup.append(this.mkToolBtn("level", "视图选项（主题 / 连线 / 配色）", (e) => this.openViewMenu(e)));
-        actGroup.append(this.mkToolBtn("present", "演示模式：逐层展开，方向键推进", () => this.togglePresent(), ""));
-        actGroup.append(this.mkToolBtn("download", "导出图片", (e) => this.openExportMenu(e)));
+        actGroup.append(this.mkToolBtn("search", this.t("tip.search", "搜索节点"), () => this.toggleSearch(), "Ctrl F"));
+        actGroup.append(this.mkToolBtn("level", this.t("tip.viewOptions", "视图选项（主题 / 连线 / 配色）"), (e) => this.openViewMenu(e)));
+        actGroup.append(this.mkToolBtn("present", this.t("tip.present", "演示模式：逐层展开，方向键推进"), () => this.togglePresent(), ""));
+        actGroup.append(this.mkToolBtn("download", this.t("tip.exportImage", "导出图片"), (e) => this.openExportMenu(e)));
         if (this.mode === "inline") {
             actGroup.append(
-                this.mkToolBtn("expand", "全屏查看", () => {
+                this.mkToolBtn("expand", this.t("tip.fullscreen", "全屏查看"), () => {
                     if (this.tree) this.cb.onFullscreen(this.tree, resolveTheme(this.options.theme));
                 }),
             );
@@ -713,12 +938,12 @@ export class MindMapView {
         actGroup.append(
             this.mkToolBtn(
                 "close",
-                this.mode === "dialog" ? "关闭" : "回到大纲视图",
+                this.mode === "dialog" ? this.t("ui.close", "关闭") : this.t("ui.backToOutline", "回到大纲视图"),
                 () => this.cb.onExit(),
             ),
         );
 
-        this.toolbarEl.append(seg, this.mkSep(), foldGroup, spacer, actGroup);
+        this.toolbarEl.append(seg, this.mkSep(), foldGroup, this.filterGroup, spacer, actGroup);
 
         // 建完立刻同步一次高亮。以前只在 setOptions / 点布局按钮时同步，
         // 于是「打开文档」这条路径上分段控件永远是三个都不亮的裸按钮 ——
@@ -763,7 +988,7 @@ export class MindMapView {
         const label = document.createElement("button");
         label.type = "button";
         label.className = "mm-zoom-label";
-        label.dataset.mmTip = "缩放选项";
+        label.dataset.mmTip = this.t("tip.zoomOptions", "缩放选项");
         label.dataset.mmKey = "Ctrl 1";
         label.onclick = (e) => {
             e.stopPropagation();
@@ -778,10 +1003,10 @@ export class MindMapView {
         this.zoomLabel = val;
 
         this.zoomBarEl.append(
-            mk("−", "缩小", () => this.zoomAt(1 / 1.2), "Ctrl -"),
+            mk("−", this.t("ui.zoomOut", "缩小"), () => this.zoomAt(1 / 1.2), "Ctrl -"),
             label,
-            mk("+", "放大", () => this.zoomAt(1.2), "Ctrl ="),
-            mk("适应", "适应画布", () => this.fit(), "Ctrl 0"),
+            mk("+", this.t("ui.zoomIn", "放大"), () => this.zoomAt(1.2), "Ctrl ="),
+            mk(this.t("ui.fit", "适应"), this.t("ui.fitCanvas", "适应画布"), () => this.fit(), "Ctrl 0"),
         );
     }
 
@@ -824,12 +1049,12 @@ export class MindMapView {
             menu.addItem({ label: key ? `${label}    ${key}` : label, disabled, click });
 
         item("100%", "Ctrl 1", Math.abs(this.scale - 1) < 0.005, () => this.setScale(1));
-        item("适应画布", "Ctrl 0", false, () => this.fit());
+        item(this.t("ui.fitCanvas", "适应画布"), "Ctrl 0", false, () => this.fit());
         const sel = this.selNodes;
-        item("适应选中节点", "", sel.length === 0, () => this.fitToNodes(sel));
+        item(this.t("ui.fitSelection", "适应选中节点"), "", sel.length === 0, () => this.fitToNodes(sel));
         item(
-            this.drillPath.length > 0 ? "只看当前分支（已聚焦）" : "只看当前分支",
-            "Ctrl 双击",
+            this.drillPath.length > 0 ? this.t("ui.onlyThisBranchActive", "只看当前分支（已聚焦）") : this.t("ui.onlyThisBranch", "只看当前分支"),
+            this.t("tip.ctrlDblClick", "Ctrl 双击"),
             !this.selected || this.selected.children.length === 0,
             () => {
                 if (this.selected) this.drillDown(this.selected);
@@ -837,7 +1062,7 @@ export class MindMapView {
         );
         menu.addItem({ type: "separator" });
         const remembered = this.prefs.scale !== undefined;
-        item(remembered ? "记住这个缩放 ✓" : "记住这个缩放", "", false, () => this.toggleRememberScale());
+        item(remembered ? this.t("ui.rememberedZoom", "记住这个缩放 ✓") : this.t("ui.rememberZoom", "记住这个缩放"), "", false, () => this.toggleRememberScale());
         this.popMenu(menu, e);
     }
 
@@ -845,19 +1070,19 @@ export class MindMapView {
     private openViewMenu(e: MouseEvent) {
         const menu = this.makeMenu("mm-view-menu");
 
-        const themeItems: IMenu[] = THEME_LIST.map((t) => ({
-            label: t.name,
-            checked: this.options.theme === t.id,
+        const themeItems: IMenu[] = THEME_LIST.map((th) => ({
+            label: this.t(`theme.${th.id}`, th.name),
+            checked: this.options.theme === th.id,
             click: () => {
-                this.options.theme = t.id;
-                this.markPref("theme", t.id);
+                this.options.theme = th.id;
+                this.markPref("theme", th.id);
                 this.render(true);
             },
         }));
-        menu.addItem({ icon: "iconTheme", label: "主题", type: "submenu", submenu: themeItems });
+        menu.addItem({ icon: "iconTheme", label: this.t("ui.theme", "主题"), type: "submenu", submenu: themeItems });
 
         const edgeItems: IMenu[] = (["curve", "elbow", "straight"] as MMEdgeStyle[]).map((k) => ({
-            label: EDGE_LABEL[k],
+            label: this.t(`edge.${k}`, EDGE_LABEL[k]),
             checked: this.options.edge === k,
             click: () => {
                 this.options.edge = k;
@@ -865,19 +1090,23 @@ export class MindMapView {
                 this.drawEdges();
             },
         }));
-        menu.addItem({ icon: "iconLine", label: "连线样式", type: "submenu", submenu: edgeItems });
+        menu.addItem({ icon: "iconLine", label: this.t("ui.edgeStyle", "连线样式"), type: "submenu", submenu: edgeItems });
 
         menu.addItem({ type: "separator" });
         const hasPrefs = Object.keys(this.prefs).length > 0;
         menu.addItem({
             icon: "iconUndo",
-            label: "恢复本列表的默认视图",
+            label: this.t("menu.resetView", "恢复本列表的默认视图"),
             disabled: !hasPrefs,
             click: () => {
+                // ① 清掉文档级偏好（`forgetPref` 内部会通知外部防抖写回块属性，
+                //    全部清空时属性会被整个删掉，而不是留一个空值）
                 for (const k of Object.keys(this.prefs) as Array<keyof MMViewPrefs>) this.forgetPref(k);
-                this.applyViewPrefs({});
-                this.render(true);
-                showMessage("已恢复默认视图", 2000);
+                // ② ⚠️ 再把被覆盖的三项显式拉回全局默认并重绘。
+                //    不能只靠 `applyViewPrefs({})` —— 它只覆盖「显式给出」的项，
+                //    空对象什么都不覆盖，画面会纹丝不动（见 `resetToGlobal()` 的注释）。
+                this.resetToGlobal();
+                showMessage(this.t("msg.viewReset", "已恢复默认视图"), 2000);
             },
         });
         this.popMenu(menu, e);
@@ -886,7 +1115,7 @@ export class MindMapView {
     /** 缩放到刚好框住这些节点 */
     private fitToNodes(nodes: MMNode[]) {
         if (nodes.length === 0) {
-            showMessage("先选中一个节点", 2200);
+            showMessage(this.t("msg.selectNodeFirst", "先选中一个节点"), 2200);
             return;
         }
         let x0 = Infinity;
@@ -920,24 +1149,30 @@ export class MindMapView {
     private toggleRememberScale() {
         if (this.prefs.scale !== undefined) {
             this.forgetPref("scale");
-            showMessage("已取消记住缩放", 2000);
+            showMessage(this.t("msg.zoomUnremembered", "已取消记住缩放"), 2000);
             return;
         }
         this.markPref("scale", this.scale);
-        showMessage(`已记住这个缩放（${Math.round(this.scale * 100)}%）`, 2200);
+        showMessage(this.t("msg.zoomRemembered", "已记住这个缩放（{n}%）", { n: Math.round(this.scale * 100) }), 2200);
     }
 
     private buildSearch() {
         this.searchInput = document.createElement("input");
         this.searchInput.type = "text";
-        this.searchInput.placeholder = "搜索节点…";
+        this.searchInput.placeholder = this.t("ui.searchPlaceholder", "搜索节点…");
         this.searchInput.spellcheck = false;
         this.searchInput.oninput = () => this.runSearch(this.searchInput.value);
         this.searchInput.onkeydown = (e) => {
             e.stopPropagation();
             if (e.key === "Enter") {
                 e.preventDefault();
-                this.stepSearch(e.shiftKey ? -1 : 1);
+                // 跨图范围下 Enter 落到结果面板的第一条 —— 那边的「下一条」
+                // 是列表里的下一行，用方向键更自然
+                if (this.searchAll) this.pickDocHit(0);
+                else this.stepSearch(e.shiftKey ? -1 : 1);
+            } else if (e.key === "ArrowDown" && this.searchAll && this.docHits.length) {
+                e.preventDefault();
+                this.pickDocHit(0);
             } else if (e.key === "Escape") {
                 e.preventDefault();
                 this.toggleSearch(false);
@@ -959,13 +1194,112 @@ export class MindMapView {
             return b;
         };
 
-        this.searchEl.append(
+        /* 范围开关：本图 / 全文档。
+           做成一个会「翻面」的按钮而不是下拉框 —— 只有两个取值，
+           下拉要多点一次，而且这个开关的使用频率比想象中高得多。 */
+        this.scopeBtn = mk(this.t("search.scopeHere", "本图"), this.t("tip.searchScope", "切换搜索范围：当前导图 / 本文档所有导图"), () => this.setSearchScope(!this.searchAll));
+        this.scopeBtn.className = "mm-search-scope";
+
+        /* 结果面板：只有「全文档」范围才用得上。
+           本图范围下命中是直接画在画布上的（`.mm-hit`），不需要列一遍。 */
+        this.resultsEl = document.createElement("div");
+        this.resultsEl.className = "mm-results";
+
+        // 原来 searchEl 自己就是那一行 flex。加结果面板之后必须分成
+        // 「一行控件 + 一块面板」，所以这里多包一层 —— 见 index.css 的 .mm-search-row。
+        const row = document.createElement("div");
+        row.className = "mm-search-row";
+        row.append(
             this.searchInput,
             this.searchCount,
-            mk("‹", "上一个", () => this.stepSearch(-1)),
-            mk("›", "下一个", () => this.stepSearch(1)),
-            mk("✕", "关闭搜索", () => this.toggleSearch(false)),
+            this.scopeBtn,
+            mk("‹", this.t("search.prev", "上一个"), () => this.stepSearch(-1)),
+            mk("›", this.t("search.next", "下一个"), () => this.stepSearch(1)),
+            mk("✕", this.t("search.close", "关闭搜索"), () => this.toggleSearch(false)),
         );
+        this.searchEl.append(row, this.resultsEl);
+    }
+
+    /** 切换搜索范围，并立刻按新范围重跑一次 */
+    private setSearchScope(all: boolean) {
+        this.searchAll = all;
+        this.scopeBtn.textContent = all ? this.t("search.scopeAll", "全文档") : this.t("search.scopeHere", "本图");
+        this.scopeBtn.classList.toggle("mm-on", all);
+        this.runSearch(this.searchInput.value);
+        if (all) this.searchInput.focus();
+    }
+
+    /** 跨图搜索的结果面板 */
+    private renderDocResults() {
+        if (!this.searchAll || !this.searchInput.value.trim()) {
+            this.resultsEl.classList.remove("mm-results--on");
+            this.resultsEl.innerHTML = "";
+            return;
+        }
+        this.updateSearchCount();
+        this.resultsEl.innerHTML = "";
+        this.resultsEl.classList.add("mm-results--on");
+
+        if (this.docHits.length === 0) {
+            const none = document.createElement("div");
+            none.className = "mm-result mm-result--none";
+            none.textContent = this.t("search.noMatchInDoc", "本文档的导图里没有匹配的节点");
+            this.resultsEl.appendChild(none);
+            return;
+        }
+
+        for (const [i, hit] of this.docHits.entries()) {
+            const row = document.createElement("button");
+            row.type = "button";
+            row.className = "mm-result";
+            const text = document.createElement("span");
+            text.className = "mm-result-text";
+            text.textContent = hit.text;
+            const path = document.createElement("span");
+            path.className = "mm-result-path";
+            // 路径去掉最后一段（就是 text 自己），只留祖先
+            const anc = hit.path.includes(" › ") ? hit.path.slice(0, hit.path.lastIndexOf(" › ")) : "";
+            path.textContent = hit.listId === this.listEl.dataset.nodeId ? this.t("search.scopeHere", "本图") : anc || this.t("search.otherMap", "另一张导图");
+            row.append(text, path);
+            row.dataset.mmTip = hit.path;
+            row.onclick = (e) => {
+                e.stopPropagation();
+                this.pickDocHit(i);
+            };
+            this.resultsEl.appendChild(row);
+        }
+    }
+
+    /**
+     * 跳到某条跨图命中。
+     *
+     * 两种情况分得很清楚：
+     *  - 命中就在**当前这张图**里 → 直接聚焦那个节点（还能顺手展开它的祖先）；
+     *  - 命中在**别的导图**里 → 把编辑器滚过去并高亮。
+     *    不去偷偷切换视图：用户正在这张图上干活，把画面换掉是一种冒犯。
+     */
+    private pickDocHit(i: number) {
+        const hit = this.docHits[i];
+        if (!hit) return;
+        if (hit.listId === this.listEl.dataset.nodeId && this.byId.has(hit.id)) {
+            // 命中可能正好被当前过滤器筛掉了（跨图搜索**不看过滤器** ——
+            // 它回答的是「这东西在文档的哪里」，不是「在这张图的可见范围里吗」）。
+            // 那就先把过滤器撤掉：用户明确找它，把焦点落到一个看不见的节点上是耍人。
+            const node = this.byId.get(hit.id)!;
+            if (node.hidden) {
+                this.filter = "all";
+                this.render(true);
+            }
+            this.searchHits = [hit.id];
+            this.searchIdx = 0;
+            this.updateSearchCount();
+            this.applySearchMarks();
+            this.gotoHit();
+        } else {
+            scrollToBlock(hit.id);
+            showMessage(this.t("msg.locatedInDoc", "已定位到正文里的那个节点"), 2200);
+        }
+        this.searchInput.focus();
     }
 
     private syncToolbar() {
@@ -979,33 +1313,33 @@ export class MindMapView {
         const sel = this.selNodes.length;
         menu.addItem({
             icon: "iconImage",
-            label: "导出 PNG",
+            label: this.t("exportPng", "导出 PNG"),
             click: () => void this.doExport("png"),
         });
         menu.addItem({
             icon: "iconFile",
-            label: "导出 SVG",
+            label: this.t("exportSvg", "导出 SVG"),
             click: () => void this.doExport("svg"),
         });
         menu.addItem({ type: "separator" });
         menu.addItem({
             icon: "iconImage",
-            label: sel > 1 ? `只导出选中的 ${sel} 个节点` : "只导出选中（先选节点）",
+            label: sel > 1 ? this.t("export.onlySelectedN", "只导出选中的 {n} 个节点", { n: sel }) : this.t("export.onlySelected", "只导出选中（先选节点）"),
             disabled: sel === 0,
             click: () => void this.doExport("png", this.selectedInDocOrder()),
         });
         menu.addItem({
             icon: "iconCopy",
-            label: "复制为图片到剪贴板",
+            label: this.t("export.copyImage", "复制为图片到剪贴板"),
             click: () => void this.copyImage(),
         });
         menu.addItem({
             icon: "iconFile",
-            label: "导出 Markdown 大纲",
+            label: this.t("export.markdown", "导出 Markdown 大纲"),
             click: () => {
                 const md = this.outlineMarkdown();
                 if (!md) {
-                    showMessage("导图是空的，没有可导出的内容", 2400);
+                    showMessage(this.t("msg.exportEmpty", "导图是空的，没有可导出的内容"), 2400);
                     return;
                 }
                 exportOutline(this.title, md);
@@ -1019,16 +1353,21 @@ export class MindMapView {
         const crop = (only ? this.selectionBounds(only) : null) ?? undefined;
         if (only && !crop) {
             restore();
-            showMessage("选中的节点都不在画面上，无法导出", 2600, "error");
+            showMessage(this.t("msg.exportOffscreen", "选中的节点都不在画面上，无法导出"), 2600, "error");
             return;
         }
         try {
             if (kind === "png") await exportPng(this.rootEl, this.title, 2, crop);
             else await exportSvg(this.rootEl, this.title, crop);
-            if (only) showMessage(`已导出选中的 ${only.length} 个节点`, 2000);
+            /* ⚠️ 这里是**拼接**式：`exported` 当「已导出」前缀用。
+               中文下与原样一致；英文下会得到 "Exported选中的 N 个节点" 这种混搭 ——
+               第二步做完整 i18n 时该把它改成占位符模板（如 `exportedN` = "已导出选中的 {n} 个节点"）。
+               现在这么接，是为了先把「声明了却没用」的键接上、且**不改变中文行为**。 */
+            if (only) showMessage(this.t("msg.exportedN", "已导出选中的 {n} 个节点", { n: only.length }), 2000);
         } catch (err) {
             console.warn("[mindmap] 导出失败", err);
-            showMessage("导出失败", 4000, "error");
+            // 用户可见的那句走 i18n；上面那行 console.warn 是开发者可见的，保持不动
+            showMessage(this.t("exportFailed", "导出失败"), 4000, "error");
         } finally {
             restore();
         }
@@ -1153,6 +1492,7 @@ export class MindMapView {
             this.emptyEl.style.display = "";
             this.refreshSelection();
             this.refreshMinimap();
+            this.syncFilterGroup();
             return;
         }
         this.emptyEl.style.display = "none";
@@ -1163,6 +1503,25 @@ export class MindMapView {
         // 换根之后这些量必须整体重算（否则一级分支会被算成第 3 层，配色和缩进全乱）。
         const root = this.applyDrill(root0);
         decorate(root, palette, this.options.branchColor);
+        // 标记里的自定义色盖在分支色之上。
+        // 盖在 `n.color` 上而不是只在画 DOM 时改一下 —— 连线、小地图、折叠按钮
+        // 全都从 `n.color` 取色，只改 DOM 的话节点变了色、连到它的线还是旧色。
+        for (const n of flatten(root)) if (n.mark?.color) n.color = n.mark.color;
+        /* 标记覆盖表：写内核到内核回推 DOM 之间的空窗（见 markOverlay 的注释）。
+           必须在 decorate 与上面那行配色**之后**盖 —— 它要同时改 mark 和 color。 */
+        if (this.markOverlay.size > 0) {
+            for (const n of flatten(root)) {
+                if (!n.id || !this.markOverlay.has(n.id)) continue;
+                const want = this.markOverlay.get(n.id) ?? undefined;
+                if (sameMark(n.mark, want)) {
+                    // DOM 已经跟上了，覆盖表这一项可以退休了
+                    this.markOverlay.delete(n.id);
+                    continue;
+                }
+                n.mark = want;
+                if (want?.color) n.color = want.color;
+            }
+        }
 
         // 折叠态：parseList 已经从 `.li[fold="1"]` 读出来了，这里只把覆盖表盖上。
         //
@@ -1188,8 +1547,17 @@ export class MindMapView {
 
         this.tree = root;
         this.byId = indexById(root);
+        // 过滤器必须在布局之前落定 —— layout 只认 kids，kids 是按 hidden 算的。
+        this.applyFilter(root);
         // 选择必须跟着新树重绑一次 —— 见 remapSelection 的注释。
         this.remapSelection();
+        // 选中的节点可能刚被筛掉了。不清掉的话，选中框会画在一个看不见的节点上，
+        // 接着按 Delete / 方向键操作的是一个「用户以为已经不存在」的东西。
+        if (this.selected?.hidden) {
+            this.selected = null;
+            this.extraSel.clear();
+        }
+        for (const n of [...this.extraSel]) if (n.hidden) this.extraSel.delete(n);
 
         /* --- 2. 建 DOM 并测量 --- */
         // 折叠收拢：先把「这一轮即将消失」的节点元素从 DOM 里摘出来，
@@ -1245,8 +1613,8 @@ export class MindMapView {
             mode: this.options.layout,
             gapX,
             gapY,
-            padX: 72,
-            padY: 64,
+            padX: LAYOUT_PAD_X,
+            padY: LAYOUT_PAD_Y,
             // 逻辑图分列：单列高度超过可视区的 2.4 倍就摊成多列。
             // 下限 1200 是为了「视口还没量出来」的首次渲染兜底。
             // ⚠️ 这里必须用 availHeight() 而不是 viewportEl.clientHeight —— 后者是
@@ -1301,6 +1669,9 @@ export class MindMapView {
         this.refreshMinimap();
         this.refreshBatchBar();
         this.refreshPresentBar();
+        this.syncFilterGroup();
+        // 浮层是贴在某个节点上的，重渲染换了元素就得重新贴一次
+        this.positionMarkPop();
     }
 
     /* ============================================================ 折叠收拢动画（P2-5） */
@@ -1398,8 +1769,18 @@ export class MindMapView {
         const vh = this.viewportEl.clientHeight;
         if (vw <= 1 || vh <= 1) return;
         this.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, want));
-        this.tx = this.frameAxis((vw - this.worldW * this.scale) / 2, this.worldW * this.scale, vw);
-        this.ty = this.frameAxis((vh - this.worldH * this.scale) / 2, this.worldH * this.scale, vh);
+        this.tx = this.frameAxis(
+            (vw - this.worldW * this.scale) / 2,
+            this.worldW * this.scale,
+            vw,
+            LAYOUT_PAD_X * this.scale,
+        );
+        this.ty = this.frameAxis(
+            (vh - this.worldH * this.scale) / 2,
+            this.worldH * this.scale,
+            vh,
+            LAYOUT_PAD_Y * this.scale,
+        );
         this.updateTransform();
     }
 
@@ -1449,7 +1830,7 @@ export class MindMapView {
             .catch((err) => {
                 console.warn("[mindmap] 结构操作异常", kind, err);
                 this.dropGhost(token);
-                this.flashError(node, "操作失败，请重试");
+                this.flashError(node, this.t("msg.operationFailed", "操作失败，请重试"));
             });
     }
 
@@ -1475,17 +1856,83 @@ export class MindMapView {
             .then((out) => {
                 tokens.forEach((t) => this.dropGhost(t));
                 if (out.ok) {
-                    showMessage(BATCH_DONE_LABEL[kind] ?? "已完成", 1800);
+                    showMessage(this.t(`batchDone.${kind}`, BATCH_DONE_LABEL[kind] ?? "已完成"), 1800);
                     return;
                 }
                 // 批量失败是**整体回滚**的，逐个闪红没有信息量，只闪一遍 + 说清原因
                 for (const n of nodes) this.flashNode(n, out.message);
-                showMessage(out.message ?? "批量操作失败，已全部还原", 3200, "error");
+                showMessage(out.message ?? this.t("msg.batchRolledBack", "批量操作失败，已全部还原"), 3200, "error");
             })
             .catch((err) => {
                 console.warn("[mindmap] 批量操作异常", kind, err);
                 tokens.forEach((t) => this.dropGhost(t));
-                showMessage("批量操作失败，已全部还原", 3200, "error");
+                showMessage(this.t("msg.batchRolledBack", "批量操作失败，已全部还原"), 3200, "error");
+            });
+    }
+
+    /* ================================================== 待办勾选（P0-1） */
+
+    /**
+     * 把勾选态画到某个复选框上（不传就按块 ID 找当前那一个）。
+     *
+     * 抽出来是因为**同一套画法要用在三处**：初次创建、点击后的乐观翻转、写失败后的回退。
+     * 三处各写一遍迟早会漂移（比如某处忘了同步 `mm-done` 或 `aria-checked`）。
+     */
+    private paintTaskCheck(n: MMNode, checked: boolean, box?: HTMLElement) {
+        const el = (n.id ? this.byId.get(n.id)?.el : undefined) ?? n.el;
+        el?.classList.toggle("mm-done", checked);
+        const b = box ?? el?.querySelector<HTMLElement>(".mm-task");
+        if (!b) return;
+        b.textContent = checked ? "✓" : "";
+        b.classList.toggle("mm-task--done", checked);
+        b.setAttribute("aria-checked", checked ? "true" : "false");
+        b.setAttribute("aria-label", checked ? this.t("menu.markTodo", "标记为未完成") : this.t("menu.markDone", "标记为已完成"));
+        b.dataset.mmTip = checked ? this.t("tip.clickToUncheck", "点击取消勾选") : this.t("tip.clickToCheck", "点击标记为已完成");
+    }
+
+    /**
+     * 点击复选框：乐观翻转 → 写内核 → 失败则退回。
+     *
+     * 这里没有走 `runAction`，因为**只有勾选需要「失败后把界面退回去」**：
+     * 其它动作失败时内核不会回推 DOM，界面本来就没变，闪个红边就够了；
+     * 而勾选是先在本地翻的，写失败时没有任何人会把那个 ✓ 抹掉 ——
+     * 不退回去，用户看到的就是一个「勾上了但其实没勾上」的假象。
+     */
+    private toggleTaskCheck(n: MMNode, box?: HTMLElement) {
+        // 正在编辑这个节点的文字时，点复选框的意图更可能是「结束编辑」
+        // （编辑态里点别处会提交并退出），所以这里先不抢
+        if (this.editing === n) return;
+        this.disarmPreview();
+
+        const next = !n.checked;
+        const revert = () => {
+            n.checked = !next;
+            this.paintTaskCheck(n, n.checked);
+        };
+
+        n.checked = next;
+        this.paintTaskCheck(n, next, box);
+
+        const token = this.showGhost(n, "toggleCheck");
+        // 目标态显式带过去。执行侧不能拿 `!node.checked` 反推 ——
+        // 上一行已经把 `n.checked` 乐观翻成了 `next`，再取反就写回原值了。
+        const res = this.cb.onNodeAction("toggleCheck", n, { checked: next });
+        if (!res) {
+            this.dropGhost(token);
+            return;
+        }
+        void res
+            .then((out) => {
+                this.dropGhost(token);
+                if (out.ok) return;
+                revert();
+                this.flashError(n, out.message);
+            })
+            .catch((err) => {
+                console.warn("[mindmap] 勾选异常", err);
+                this.dropGhost(token);
+                revert();
+                this.flashError(n, this.t("err.checkFailed", "勾选失败，请重试"));
             });
     }
 
@@ -1504,7 +1951,7 @@ export class MindMapView {
         const el = document.createElement("div");
         el.className = "mm-ghost";
         el.setAttribute("contenteditable", "false");
-        el.textContent = GHOST_LABEL[kind] ?? "处理中…";
+        el.textContent = this.t(`ghost.${kind}`, GHOST_LABEL[kind] ?? "处理中…");
 
         const creating =
             kind === "insertChild" ||
@@ -1564,7 +2011,7 @@ export class MindMapView {
     }
 
     private flashError(node: MMNode, message?: string) {
-        const msg = message || "操作未生效，请重试";
+        const msg = message || this.t("msg.operationIneffective", "操作未生效，请重试");
         this.flashNode(node, msg);
         showMessage(msg, 3000, "error");
     }
@@ -1616,7 +2063,11 @@ export class MindMapView {
             return;
         }
         if (!this.batchEl) this.buildBatchBar();
-        if (this.batchCountEl) this.batchCountEl.textContent = `已选 ${n} 个`;
+        if (this.batchCountEl) this.batchCountEl.textContent = this.t("ui.selectedN", "已选 {n} 个", { n });
+        // 「完成 / 取消」只对含待办的选区露面。用 display 而不是重建，
+        // 免得每次改选都换一批 DOM 让鼠标下的按钮闪一下。
+        const hasTask = this.selectedInDocOrder().some((x) => x.kind === "task");
+        for (const el of this.batchCheckEls) el.style.display = hasTask ? "" : "none";
     }
 
     /**
@@ -1657,7 +2108,7 @@ export class MindMapView {
         close.type = "button";
         close.className = "mm-batch-x";
         close.textContent = "✕";
-        close.dataset.mmTip = "取消选择";
+        close.dataset.mmTip = this.t("menu.clearSelection", "取消选择");
         close.onclick = (e) => {
             e.stopPropagation();
             this.clearSelection();
@@ -1666,15 +2117,28 @@ export class MindMapView {
         bar.append(
             count,
             sep(),
-            btn("升级", "把选中的节点整体升级一级", "", () => this.runBatchAction("outdent", this.selectedInDocOrder())),
-            btn("降级", "把选中的节点整体降级为「上一个节点」的子节点", "", () =>
+            btn(this.t("act.outdent", "升级"), this.t("tip.batchOutdent", "把选中的节点整体升级一级"), "", () => this.runBatchAction("outdent", this.selectedInDocOrder())),
+            btn(this.t("act.indent", "降级"), this.t("tip.batchIndent", "把选中的节点整体降级为「上一个节点」的子节点"), "", () =>
                 this.runBatchAction("indent", this.selectedInDocOrder()),
             ),
-            btn("折叠", "折叠选中的节点", "", () => this.batchFold(true)),
-            btn("展开", "展开选中的节点", "", () => this.batchFold(false)),
+            btn(this.t("act.collapse", "折叠"), this.t("tip.batchFold", "折叠选中的节点"), "", () => this.batchFold(true)),
+            btn(this.t("act.expand", "展开"), this.t("tip.batchUnfold", "展开选中的节点"), "", () => this.batchFold(false)),
             sep(),
-            btn("导出这些", "只导出选中的子树", "", () => this.runBatchAction("export", this.selectedInDocOrder())),
-            btn("删除", "删除选中的节点及其子树（Ctrl+Z 可撤销）", " mm-batch-btn--danger", () =>
+        );
+
+        // 待办专用：混选时也能用（只作用于其中的待办项），全选普通段落时整组隐藏
+        const checkDone = btn(this.t("ui.done", "完成"), this.t("tip.batchCheck", "把选中的待办标记为已完成"), "", () =>
+            this.runBatchAction("check", this.selectedInDocOrder()),
+        );
+        const checkUndo = btn(this.t("ui.cancel", "取消"), this.t("tip.batchUncheck", "把选中的待办标记为未完成"), "", () =>
+            this.runBatchAction("uncheck", this.selectedInDocOrder()),
+        );
+        this.batchCheckEls = [checkDone, checkUndo];
+        bar.append(checkDone, checkUndo, sep());
+
+        bar.append(
+            btn(this.t("menu.exportThese", "导出这些"), this.t("menu.exportSelectedDesc", "只导出选中的子树"), "", () => this.runBatchAction("export", this.selectedInDocOrder())),
+            btn(this.t("act.delete", "删除"), this.t("tip.batchDelete", "删除选中的节点及其子树（Ctrl+Z 可撤销）"), " mm-batch-btn--danger", () =>
                 this.runBatchAction("delete", this.selectedInDocOrder()),
             ),
             close,
@@ -1690,13 +2154,14 @@ export class MindMapView {
         this.batchEl?.remove();
         this.batchEl = null;
         this.batchCountEl = null;
+        this.batchCheckEls = [];
     }
 
     /** 批量折叠：直接改大纲的原生 fold（与单击折叠走同一条写回链路） */
     private batchFold(folded: boolean) {
         const nodes = this.selectedInDocOrder().filter((n) => n.children.length > 0);
         if (nodes.length === 0) {
-            showMessage("选中的节点都没有子节点", 2200);
+            showMessage(this.t("msg.noChildren", "选中的节点都没有子节点"), 2200);
             return;
         }
         for (const n of nodes) {
@@ -1705,7 +2170,8 @@ export class MindMapView {
         }
         this.render();
         this.reclampView();
-        showMessage(BATCH_DONE_LABEL[folded ? "fold" : "unfold"] ?? "已完成", 1600);
+        const doneKey = folded ? "fold" : "unfold";
+        showMessage(this.t(`batchDone.${doneKey}`, BATCH_DONE_LABEL[doneKey] ?? "已完成"), 1600);
     }
 
     /* ========================================================= 悬停预览（P1-1） */
@@ -1741,7 +2207,7 @@ export class MindMapView {
 
         const head = document.createElement("div");
         head.className = "mm-preview-head";
-        head.textContent = `折叠了 ${n.children.length} 个子节点`;
+        head.textContent = this.t("msg.foldedN", "折叠了 {n} 个子节点", { n: n.children.length });
         el.appendChild(head);
 
         const list = document.createElement("div");
@@ -1754,14 +2220,14 @@ export class MindMapView {
             dot.style.background = kid.color ?? this.palette0;
             const txt = document.createElement("span");
             txt.className = "mm-preview-txt";
-            txt.textContent = kid.text || "（空）";
+            txt.textContent = kid.text || this.t("ui.empty", "（空）");
             row.append(dot, txt);
             list.appendChild(row);
         }
         if (n.children.length > 5) {
             const more = document.createElement("div");
             more.className = "mm-preview-more";
-            more.textContent = `还有 ${n.children.length - 5} 个…`;
+            more.textContent = this.t("ui.moreN", "还有 {n} 个…", { n: n.children.length - 5 });
             list.appendChild(more);
         }
         el.appendChild(list);
@@ -1902,7 +2368,7 @@ export class MindMapView {
             const prev = document.createElement("button");
             prev.type = "button";
             prev.textContent = "‹";
-            prev.dataset.mmTip = "上一个（←）";
+            prev.dataset.mmTip = this.t("present.prev", "上一个（←）");
             prev.onclick = (e) => {
                 e.stopPropagation();
                 this.presentGo(this.presentIdx - 1);
@@ -1911,7 +2377,7 @@ export class MindMapView {
             const next = document.createElement("button");
             next.type = "button";
             next.textContent = "›";
-            next.dataset.mmTip = "下一个（→ / 空格）";
+            next.dataset.mmTip = this.t("present.next", "下一个（→ / 空格）");
             next.onclick = (e) => {
                 e.stopPropagation();
                 this.presentGo(this.presentIdx + 1);
@@ -1920,8 +2386,8 @@ export class MindMapView {
             const out = document.createElement("button");
             out.type = "button";
             out.className = "mm-present-exit";
-            out.textContent = "退出演示";
-            out.dataset.mmTip = "退出（Esc）";
+            out.textContent = this.t("ui.exitPresent", "退出演示");
+            out.dataset.mmTip = this.t("present.exit", "退出（Esc）");
             out.onclick = (e) => {
                 e.stopPropagation();
                 this.togglePresent(false);
@@ -2061,10 +2527,10 @@ export class MindMapView {
             const blob = await renderPngBlob(this.rootEl);
             if (!blob) throw new Error("PNG 编码失败");
             await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-            showMessage("已复制图片到剪贴板", 2000);
+            showMessage(this.t("msg.imageCopied", "已复制图片到剪贴板"), 2000);
         } catch (err) {
             console.warn("[mindmap] 复制图片失败", err);
-            showMessage("复制图片失败，浏览器可能不支持", 3200, "error");
+            showMessage(this.t("msg.copyImageFailed", "复制图片失败，浏览器可能不支持"), 3200, "error");
         } finally {
             restore();
         }
@@ -2139,7 +2605,7 @@ export class MindMapView {
         const labels: string[] = [];
         let cur: MMNode | null = this.tree;
         while (cur) {
-            labels.unshift(cur.text?.trim() || "（空）");
+            labels.unshift(cur.text?.trim() || this.t("ui.empty", "（空）"));
             cur = cur.parent;
         }
         return labels;
@@ -2167,7 +2633,7 @@ export class MindMapView {
             const last = i === labels.length - 1;
             b.className = `mm-crumb-item${last ? " mm-crumb-cur" : ""}`;
             b.textContent = label;
-            b.dataset.mmTip = last ? "当前聚焦的分支" : "回到这一层";
+            b.dataset.mmTip = last ? this.t("ui.currentBranch", "当前聚焦的分支") : this.t("ui.backToLevel", "回到这一层");
             b.disabled = last;
             b.onclick = (e) => {
                 e.stopPropagation();
@@ -2179,8 +2645,8 @@ export class MindMapView {
         const out = document.createElement("button");
         out.type = "button";
         out.className = "mm-crumb-out";
-        out.textContent = "退出聚焦";
-        out.dataset.mmTip = "回到全图（Esc）";
+        out.textContent = this.t("ui.exitFocus", "退出聚焦");
+        out.dataset.mmTip = this.t("ui.backToFullMap", "回到全图（Esc）");
         out.onclick = (e) => {
             e.stopPropagation();
             this.drillTo(0);
@@ -2402,7 +2868,20 @@ export class MindMapView {
         const depth = Math.min(n.depth, 4);
         el.className = `mm-node mm-d${depth}`;
         if (n.kind === "task" && n.checked) el.classList.add("mm-done");
-        el.dataset.nodeId = n.id;
+        /*
+         * ⚠️ 这里**绝对不能**用 `data-node-id`。
+         *
+         * 思源前端处理事务时是按 `[data-node-id="<块ID>"]` 在全文档里查元素的
+         * （`querySelector` 只看文档顺序，不看可见性）。导图就长在 `.protyle-wysiwyg`
+         * 里面，一旦自己的节点也带上这个属性，就会和真的大纲块**同名撞车**：
+         * Protyle 想把某个列表项插回去，查到的却是导图里的 `.mm-node`，
+         * 于是**把真实的大纲块插进了导图内部** —— 实测（3.8.4）表现为
+         * 「点一下待办复选框，导图上那个节点变成了一段大纲 HTML，
+         * 内核里 marker 也没改上」，而且块 ID 会被重排。
+         *
+         * 用 `data-mm-id` 这个带命名空间的名字，谁都撞不到。
+         */
+        el.dataset.mmId = n.id;
         // 大纲里的光标位置要跨渲染保持 —— DOM 重建会丢掉类名
         if (this.cursorId && this.cursorId === n.id) el.classList.add("mm-cursor");
 
@@ -2422,16 +2901,42 @@ export class MindMapView {
         }
 
         if (n.kind === "task") {
-            const box = document.createElement("span");
-            box.className = `mm-task ${n.checked ? "mm-task--done" : ""}`;
-            box.textContent = n.checked ? "✓" : "";
+            // 用 <button> 而不是 <span>：Tab 能聚焦、空格/回车能触发、读屏会念出状态。
+            // 之前的 <span> 只是「看起来能点」，语义上是死的 —— 键盘用户完全够不着。
+            const box = document.createElement("button");
+            box.type = "button";
+            box.className = `mm-task${n.checked ? " mm-task--done" : ""}`;
+            box.setAttribute("role", "checkbox");
+            this.paintTaskCheck(n, !!n.checked, box);
+            box.onclick = (e) => {
+                e.stopPropagation();
+                this.toggleTaskCheck(n, box);
+            };
             inner.appendChild(box);
         }
 
         const txt = document.createElement("span");
         txt.className = "mm-txt";
         txt.innerHTML = n.html;
+
+        /* ---- 节点标记（P1-2）----
+         * 图标在文字**前**、标签在文字**后**：
+         * 图标是「一眼扫过去」的信号，得在视线起点；标签是补充说明，压在末尾不抢位置。
+         * 两者都不进 `.mm-txt`（那是可编辑区），否则双击改名时会被当成节点文字一起写回内核。
+         */
+        if (n.mark?.icon) {
+            const ic = document.createElement("span");
+            ic.className = "mm-mark-icon";
+            ic.textContent = n.mark.icon;
+            inner.appendChild(ic);
+        }
         inner.appendChild(txt);
+        if (n.mark?.label) {
+            const lb = document.createElement("span");
+            lb.className = "mm-mark-label";
+            lb.textContent = n.mark.label;
+            inner.appendChild(lb);
+        }
 
         el.appendChild(inner);
 
@@ -2439,8 +2944,8 @@ export class MindMapView {
             const tog = document.createElement("div");
             tog.className = `mm-toggle${n.folded ? " mm-toggle--collapsed" : ""}`;
             tog.textContent = n.folded ? String(n.children.length) : "−";
-            tog.dataset.mmTip = n.folded ? `展开 ${n.children.length} 个子节点` : "折叠子节点";
-            tog.dataset.mmKey = "空格";
+            tog.dataset.mmTip = n.folded ? this.t("tip.expandN", "展开 {n} 个子节点", { n: n.children.length }) : this.t("tip.collapseChildren", "折叠子节点");
+            tog.dataset.mmKey = this.t("tip.space", "空格");
             tog.onclick = (e) => {
                 e.stopPropagation();
                 this.disarmPreview();
@@ -2464,7 +2969,7 @@ export class MindMapView {
             const add = document.createElement("button");
             add.type = "button";
             add.textContent = "+";
-            add.dataset.mmTip = "插入子节点";
+            add.dataset.mmTip = this.t("menu.insertChild", "插入子节点");
             add.dataset.mmKey = "Tab";
             add.onclick = (e) => {
                 e.stopPropagation();
@@ -2476,8 +2981,8 @@ export class MindMapView {
                 const drill = document.createElement("button");
                 drill.type = "button";
                 drill.textContent = "⊙";
-                drill.dataset.mmTip = "聚焦此分支";
-                drill.dataset.mmKey = "Ctrl 双击";
+                drill.dataset.mmTip = this.t("menu.focusBranch", "聚焦此分支");
+                drill.dataset.mmKey = this.t("tip.ctrlDblClick", "Ctrl 双击");
                 drill.onclick = (e) => {
                     e.stopPropagation();
                     this.drillDown(n);
@@ -2489,7 +2994,7 @@ export class MindMapView {
                 const fold = document.createElement("button");
                 fold.type = "button";
                 fold.textContent = n.folded ? "▸" : "▾";
-                fold.dataset.mmTip = n.folded ? "展开" : "折叠";
+                fold.dataset.mmTip = n.folded ? this.t("act.expand", "展开") : this.t("act.collapse", "折叠");
                 fold.onclick = (e) => {
                     e.stopPropagation();
                     this.toggleFold(n);
@@ -2655,11 +3160,14 @@ export class MindMapView {
     private selectAllSiblings() {
         const n = this.selected;
         if (!n?.parent) return;
-        const sibs = n.parent.children;
+        // 同级按「看得见的」算 —— 被过滤器筛掉的兄弟不该被框进来，
+        // 否则下一步的批量操作（删除 / 勾选）会作用在用户根本看不到的节点上
+        const sibs = shownChildren(n.parent);
         const allSelected = sibs.every((s) => s === this.selected || this.extraSel.has(s));
         if (allSelected) {
             this.selected = this.tree;
             this.extraSel.clear();
+            // 整棵树这条分支走 `kids`，已经自带「折叠 + 过滤」两重筛
             const walk = (x: MMNode) => {
                 if (x !== this.tree) this.extraSel.add(x);
                 x.kids.forEach(walk);
@@ -2824,6 +3332,10 @@ export class MindMapView {
     /**
      * 方向键导航。
      * ↑↓ 走同级，← 回父节点，→ 进第一个子节点（折叠则先展开）。
+     *
+     * 同级与子级都按 `shownChildren()` 取 —— 折叠的、被过滤器筛掉的一律跳过。
+     * 用 `children` 的话，方向键会停在一个**看不见的节点**上：选中框不出现、
+     * 按 Enter 却会去改那个节点，是那种「界面没反应但其实干了事」的故障。
      */
     private navigate(dir: "up" | "down" | "left" | "right" | "home" | "end") {
         const cur = this.selected ?? this.tree;
@@ -2834,20 +3346,21 @@ export class MindMapView {
             return;
         }
         if (dir === "right") {
-            if (cur.children.length === 0) return;
+            const kids = shownChildren(cur);
+            if (kids.length === 0) return;
+            // 折叠着按 → 先展开，不跳进去 —— 与「展开」这个动作本身保持一致
             if (cur.folded) {
                 this.toggleFold(cur);
                 this.selected = cur;
                 this.refreshSelection();
             }
-            const first = cur.children[0];
-            if (first) this.focusNode(first);
+            this.focusNode(kids[0]);
             return;
         }
 
         const parent = cur.parent;
         if (!parent) return;
-        const sibs = parent.children;
+        const sibs = shownChildren(parent);
         const idx = sibs.indexOf(cur);
         if (idx < 0) return;
 
@@ -2885,20 +3398,57 @@ export class MindMapView {
         //      HTMLElement.prototype.focus 打桩抓到的调用栈）。
         //
         // 两者都是同步调用，所以一个 setTimeout(0) 就能稳定赢过它们（谁后调用谁赢）。
+        //
+        // ★ 但「被我们接管了才抢焦点」有一个致命缺口：**修饰键单独按下的那一下**。
+        //
+        // 真实键盘按 Ctrl+D 会先产生一个 `key === "Control"` 的 keydown。
+        // 这一下导图没有任何动作可做（不会 preventDefault），可思源的编辑器照样
+        // 在这个 keydown 里 focus 自己 —— 焦点被抢到 `.protyle-wysiwyg`，
+        // 而它**是 `.mm-root` 的祖先**，所以紧接着的 `D` 那一下 target 已经不在导图里，
+        // `handleGlobalKey` 开头就 return 了。
+        //
+        // 后果：导图的整套 Ctrl 快捷键（A / C / V / X / D、以及缩放那几个）
+        // 在**真实键盘下全部失灵**，而测试里用「只发字母 + modifiers 位」的合成按键
+        // 一直测不出来（单事件发法没有裸修饰键那一下，焦点不会丢）。
+        // 实测（tests/kernel/probe-altmod-swallow.mjs）：
+        //   真键盘式 Ctrl+D → 焦点 mm-root → protyle-wysiwyg，内核列表项数 3 → 3（没复制）
+        //   单事件 Ctrl+D   → 焦点 mm-root → mm-txt，内核列表项数 3 → 4（复制成功）
+        // 所以修饰键也要把焦点抢回来，让后续的字母键能落在导图里。
         if (e.defaultPrevented) this.restoreFocus();
+        else if (MODIFIER_ONLY_KEYS.has(e.key)) this.restoreFocus(true);
     }
 
     /**
      * 把焦点抢回导图根元素。
      * 异步做，免得和 trapFocus / 编辑器里同步的 focus() 打架（谁后调用谁赢）。
+     *
+     * `fromModifier` 为真时再多补两次 —— 修饰键单独按下那一下，思源编辑器抢焦点
+     * **有快有慢**（实测同一个动作，有时同步发生、有时晚一个节拍），
+     * 只做一次 `setTimeout(0)` 会输给后者，`Ctrl+D` 照样收不到。
+     *
+     * 补的那两次**必须收窄**：只针对「焦点落在思源编辑器 `.protyle-wysiwyg` 里」
+     * 这一种情况。不加这个限制的话，按 ⌥⇧P 时会把焦点从刚打开的命令面板输入框里
+     * 抢回导图，用户就打不了字了。
      */
-    private restoreFocus() {
-        window.setTimeout(() => {
+    private restoreFocus(fromModifier = false) {
+        const attempt = () => {
             if (this.destroyed || this.editing || this.searchOpen) return;
             if (!this.rootEl.isConnected) return;
             if (this.rootEl.contains(document.activeElement)) return;
             this.rootEl.focus({ preventScroll: true });
-        }, 0);
+        };
+        window.setTimeout(attempt, 0);
+        if (!fromModifier) return;
+        for (const delay of [60, 200]) {
+            window.setTimeout(() => {
+                const a = document.activeElement as HTMLElement | null;
+                if (!a || typeof a.closest !== "function") return;
+                // 只抢「被思源编辑器抢走」的焦点，别的一概不动
+                if (!a.closest(".protyle-wysiwyg")) return;
+                if (this.rootEl.contains(a)) return;
+                attempt();
+            }, delay);
+        }
     }
 
     /**
@@ -2914,10 +3464,24 @@ export class MindMapView {
         if (e.isComposing) return;
         // 搜索框自己处理
         if ((e.target as HTMLElement)?.closest?.(".mm-search")) return;
+        // 标记浮层里有一个输入框，方向键 / 回车 / 退格都得归它自己
+        if ((e.target as HTMLElement)?.closest?.(".mm-mark-pop")) return;
         // 编辑态下键盘归输入框，由 beginEdit 里的处理器负责
         if (this.editing) return;
 
         const mod = e.ctrlKey || e.metaKey;
+        /**
+         * 「导图自己的 Ctrl / Cmd 快捷键」的判据 —— 必须**排除按住 Alt 的情况**。
+         *
+         * `⌥⌘X` 是思源与别的插件共用的命名空间：本工作空间里 flowmind 占了 ⌥⌘K / ⌥⌘L、
+         * 魔法排版占了 ⌥⌘P，本插件自己也把「切换导图 / 大纲」绑在 ⌥⌘D、
+         * 「并排打开」绑在 ⌥⌘V。
+         *
+         * 只判 `mod` 的话，导图有焦点时按 ⌥⌘D 会命中下面的 `Ctrl+D`（复制节点）——
+         * 实测后果很扎眼：**全局切换键没生效，反而把选中节点的子树复制一份写进了内核**
+         * （6 个节点变 12 个），而且没有任何提示。同理 ⌥⌘V 会变成「粘贴」。
+         */
+        const modOnly = mod && !e.altKey;
         const key = e.key;
 
         // 白名单：系统级 / 浏览器级快捷键一律放行
@@ -2970,15 +3534,19 @@ export class MindMapView {
         const cur = this.selected;
 
         /* ---- 视图 ---- */
-        if (mod && (key === "=" || key === "+")) return take(() => this.zoomAt(1.2));
-        if (mod && key === "-") return take(() => this.zoomAt(1 / 1.2));
-        if (mod && key === "0") return take(() => this.fit());
-        if (mod && key === "1") return take(() => this.setScale(1));
-        if (mod && key.toLowerCase() === "f") return take(() => this.toggleSearch(true));
-        if (!mod && (key === "f" || key === "F") && this.mode === "inline") {
+        if (modOnly && (key === "=" || key === "+")) return take(() => this.zoomAt(1.2));
+        if (modOnly && key === "-") return take(() => this.zoomAt(1 / 1.2));
+        if (modOnly && key === "0") return take(() => this.fit());
+        if (modOnly && key === "1") return take(() => this.setScale(1));
+        if (modOnly && key.toLowerCase() === "f") return take(() => this.toggleSearch(true));
+        if (!mod && !e.altKey && (key === "f" || key === "F") && this.mode === "inline") {
             if (!this.tree) return;
             return take(() => this.cb.onFullscreen(this.tree!, resolveTheme(this.options.theme)));
         }
+
+        /* ---- 标记浮层开着时，Esc 先关浮层 ---- */
+        // 排在菜单之前：它是更浅的一层，浮层关掉之前不该去动选中 / 下钻
+        if (key === "Escape" && this.markPop) return take(() => this.closeMarkPopover());
 
         /* ---- 插件自己的菜单开着时，Esc 先关菜单 ---- */
         // 必须排在下面「退出」之前：键盘处理挂在 document 捕获阶段，
@@ -3016,6 +3584,11 @@ export class MindMapView {
             if (key === "End") return take(() => this.navigate("end"));
             if (key === " ") return take(() => this.toggleFold(cur));
             if (key === "F2") return take(() => this.beginEdit(cur));
+            // 勾选待办：`x` 是待办清单里的通用约定（GitHub / 任务管理器都这么用），
+            // 比 Enter 更不容易误触 —— Enter 在导图里是「插入同级节点」。
+            if ((key === "x" || key === "X") && cur.kind === "task") {
+                return take(() => this.toggleTaskCheck(cur));
+            }
             // Shift+Tab 是降级，要留给下面的「结构编辑」分支处理，不能被这里的 Tab 截走。
             // Shift+Enter 在导图里没有对应语义（节点是单行文本，软换行渲染不出来），
             // 吞掉它，避免漏给编辑器在正文里插一个换行。
@@ -3030,7 +3603,7 @@ export class MindMapView {
                     // （见 history.ts —— 思源的 Ctrl+Z 管不到块 API 写出来的内容），
                     // 但撤销栈有长度上限，误删一大片还是先问一句更稳妥。
                     if (targets.length > 1) {
-                        if (window.confirm(`确定删除选中的 ${targets.length} 个节点及其子树？`)) {
+                        if (window.confirm(this.t("dlg.confirmDeleteN", "确定删除选中的 {n} 个节点及其子树？", { n: targets.length }))) {
                             // 走批量：整体成功或整体回滚，不会删一半卡住
                             this.runBatchAction("delete", targets);
                         }
@@ -3038,7 +3611,7 @@ export class MindMapView {
                     }
                     const only = targets[0];
                     const kids = only.children.length;
-                    if (kids > 0 && !window.confirm(`「${only.text}」下还有 ${kids} 个子节点，一并删除？`)) return;
+                    if (kids > 0 && !window.confirm(this.t("dlg.confirmDeleteKids", "「{text}」下还有 {n} 个子节点，一并删除？", { text: only.text, n: kids }))) return;
                     void this.runAction("delete", only);
                 });
             }
@@ -3046,22 +3619,22 @@ export class MindMapView {
 
         /* ---- 结构编辑 ---- */
         if (e.shiftKey && key === "Tab") return take(() => void this.runAction("outdent", cur));
-        if (mod && key === "ArrowUp") return take(() => void this.runAction("moveUp", cur));
-        if (mod && key === "ArrowDown") return take(() => void this.runAction("moveDown", cur));
-        if (mod && key.toLowerCase() === "a") return take(() => this.selectAllSiblings());
-        if (mod && key.toLowerCase() === "d") return take(() => void this.runAction("duplicate", cur));
-        if (mod && key.toLowerCase() === "c") {
+        if (modOnly && key === "ArrowUp") return take(() => void this.runAction("moveUp", cur));
+        if (modOnly && key === "ArrowDown") return take(() => void this.runAction("moveDown", cur));
+        if (modOnly && key.toLowerCase() === "a") return take(() => this.selectAllSiblings());
+        if (modOnly && key.toLowerCase() === "d") return take(() => void this.runAction("duplicate", cur));
+        if (modOnly && key.toLowerCase() === "c") {
             return take(() => {
                 this.clipboard = serializeSubtree(cur);
                 void this.copyNodeText(cur);
             });
         }
-        if (mod && key.toLowerCase() === "v") {
+        if (modOnly && key.toLowerCase() === "v") {
             if (!this.clipboard) return;
             const data = this.clipboard;
             return take(() => void this.runAction("paste", cur, { data }));
         }
-        if (mod && key.toLowerCase() === "x") {
+        if (modOnly && key.toLowerCase() === "x") {
             return take(() => {
                 this.clipboard = serializeSubtree(cur);
                 void this.copyNodeText(cur);
@@ -3070,8 +3643,8 @@ export class MindMapView {
         }
 
         /* ---- 升降级 ---- */
-        if (e.altKey && key === "ArrowLeft") return take(() => void this.runAction("outdent", cur));
-        if (e.altKey && key === "ArrowRight") return take(() => void this.runAction("indent", cur));
+        if (e.altKey && !mod && key === "ArrowLeft") return take(() => void this.runAction("outdent", cur));
+        if (e.altKey && !mod && key === "ArrowRight") return take(() => void this.runAction("indent", cur));
     }
 
     /* ==================================================================== 编辑 */
@@ -3137,7 +3710,7 @@ export class MindMapView {
                 blurTimer = 0;
             }
         };
-        const finish = (commit: boolean) => {
+        const finish = (commit: boolean, refocus = false) => {
             if (done) return;
             done = true;
             cleanup();
@@ -3159,15 +3732,32 @@ export class MindMapView {
                     if (!this.destroyed && !this.editing) this.render();
                 }, 0);
             }
+
+            /**
+             * 把焦点还给导图 —— **只在该「用户用键盘主动退出编辑」时做**。
+             *
+             * ⚠️ 不能在失焦提交时做：点别处导致的 blur 也会走到这里，
+             *    那时去抢焦点会把用户从他**刚点进去的地方**拽回来
+             *    （刚点进思源编辑器、刚打开命令面板……）。
+             *    这与 `restoreFocus` 里「只抢被思源编辑器抢走的那种焦点」是同一条纪律。
+             *
+             * 不还的后果实测很重（`tests/kernel/diag-undo-after-insert.mjs`）：
+             * 退出编辑后焦点落到布局容器（`fn__flex-column`）上，
+             * **导图的键盘整体失效** —— 方向键 / Tab / Enter / 空格 / Ctrl+Z 全都不响应，
+             * 用户得再点一下导图才能继续。其中 Ctrl+Z 最刺眼：
+             * 按了**完全没反应**（既没被插件接，也没冒泡给思源）。
+             */
+            if (refocus) this.restoreFocus();
         };
         const onKey = (e: KeyboardEvent) => {
             e.stopPropagation();
             if (e.key === "Enter") {
                 e.preventDefault();
-                finish(true);
+                // 第二个参数 = 键盘主动退出 → 把焦点还给导图（见 finish 里的长注释）
+                finish(true, true);
             } else if (e.key === "Escape") {
                 e.preventDefault();
-                finish(false);
+                finish(false, true);
             }
         };
         /**
@@ -3212,12 +3802,12 @@ export class MindMapView {
         if (type === "a") {
             const href = el.dataset.href || el.getAttribute("href") || "";
             if (href) window.open(href, "_blank", "noopener,noreferrer");
-            else showMessage("这个链接没有地址", 2000);
+            else showMessage(this.t("msg.linkNoHref", "这个链接没有地址"), 2000);
             return;
         }
         const id = el.dataset.id;
         if (id) this.cb.onOpenBlock(id);
-        else showMessage("这个双链没有目标块", 2000);
+        else showMessage(this.t("msg.linkNoTarget", "这个双链没有目标块"), 2000);
     }
 
     /** 图片放大：遮罩层里看原图，点任意处或 Esc 关闭 */
@@ -3257,6 +3847,242 @@ export class MindMapView {
 
     /* ==================================================================== 菜单 */
 
+    /* ==================================================================== 节点标记（P1-2） */
+
+    /**
+     * 打开「节点标记」浮层。
+     *
+     * 为什么不是一串 `window.prompt`：图标 / 标签 / 颜色是三个并列的维度，
+     * 分三次问不仅烦，而且每次都要走一遍「写内核 → 重渲染」。
+     * 一个浮层里一次配完，改一项即时生效（所见即所得），关掉就是最终结果。
+     */
+    private openMarkPopover(n: MMNode) {
+        this.closeMarkPopover();
+        const anchor = n.el;
+        if (!anchor) return;
+
+        const pop = document.createElement("div");
+        pop.className = "mm-mark-pop";
+        /** 当前编辑中的标记 —— 点一下改一项，攒着一起提交 */
+        let draft: MMNodeMark = { ...(n.mark ?? {}) };
+
+        const sync = () => {
+            for (const b of pop.querySelectorAll<HTMLElement>("[data-icon]")) {
+                b.classList.toggle("mm-on", b.dataset.icon === draft.icon);
+            }
+            for (const b of pop.querySelectorAll<HTMLElement>("[data-color]")) {
+                b.classList.toggle("mm-on", b.dataset.color === draft.color);
+            }
+            const clr = pop.querySelector<HTMLElement>(".mm-mark-clear");
+            if (clr) clr.classList.toggle("mm-dim", !hasMark(draft));
+        };
+        const apply = () => {
+            this.commitMark(n, draft);
+            sync();
+        };
+
+        const row = (label: string) => {
+            const r = document.createElement("div");
+            r.className = "mm-mark-row";
+            const t = document.createElement("span");
+            t.className = "mm-mark-cap";
+            t.textContent = label;
+            r.appendChild(t);
+            pop.appendChild(r);
+            return r;
+        };
+
+        /* ---- 图标 ---- */
+        const iconRow = row(this.t("mark.icon", "图标"));
+        for (const icon of MARK_ICONS) {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.dataset.icon = icon;
+            b.dataset.mmTip = icon;
+            b.textContent = icon;
+            b.onclick = (e) => {
+                e.stopPropagation();
+                // 再点一次取消 —— 否则选错了只能整条清掉重来
+                draft.icon = draft.icon === icon ? undefined : icon;
+                apply();
+            };
+            iconRow.appendChild(b);
+        }
+
+        /* ---- 标签 ---- */
+        const labelRow = row(this.t("mark.label", "标签"));
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "mm-mark-input";
+        input.maxLength = MARK_LABEL_MAX;
+        input.placeholder = this.t("mark.maxLen", "最多 {n} 个字", { n: MARK_LABEL_MAX });
+        input.value = draft.label ?? "";
+        input.oninput = () => {
+            draft.label = input.value.trim() || undefined;
+        };
+        // 输入框里按回车 / 失焦即生效；Esc 关掉浮层。
+        // 这三个键必须 stopPropagation —— 导图的全局键盘处理挂在捕获阶段，
+        // 不拦住的话回车会变成「插入同级节点」、Esc 会去清空选中。
+        input.onkeydown = (e) => {
+            e.stopPropagation();
+            if (e.key === "Enter" || e.key === "Escape") {
+                e.preventDefault();
+                apply();
+                if (e.key === "Escape") this.closeMarkPopover();
+            }
+        };
+        input.onblur = () => apply();
+        labelRow.appendChild(input);
+
+        /* ---- 颜色 ---- */
+        const colorRow = row(this.t("mark.color", "颜色"));
+        const def = document.createElement("button");
+        def.type = "button";
+        def.dataset.color = "";
+        def.className = "mm-mark-swatch mm-mark-swatch--def";
+        def.dataset.mmTip = this.t("mark.followBranch", "跟随分支色");
+        def.onclick = (e) => {
+            e.stopPropagation();
+            draft.color = undefined;
+            apply();
+        };
+        colorRow.appendChild(def);
+        for (const color of MARK_COLORS) {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.dataset.color = color;
+            b.className = "mm-mark-swatch";
+            b.dataset.mmTip = color;
+            b.style.background = color;
+            b.onclick = (e) => {
+                e.stopPropagation();
+                draft.color = draft.color === color ? undefined : color;
+                apply();
+            };
+            colorRow.appendChild(b);
+        }
+
+        /* ---- 底部 ---- */
+        const foot = document.createElement("div");
+        foot.className = "mm-mark-foot";
+        const clear = document.createElement("button");
+        clear.type = "button";
+        clear.className = "mm-mark-clear";
+        clear.textContent = this.t("menu.clearMark", "清除标记");
+        clear.onclick = (e) => {
+            e.stopPropagation();
+            draft = {};
+            input.value = "";
+            apply();
+        };
+        const done = document.createElement("button");
+        done.type = "button";
+        done.className = "mm-mark-done";
+        done.textContent = this.t("ui.done", "完成");
+        done.onclick = (e) => {
+            e.stopPropagation();
+            this.closeMarkPopover();
+        };
+        foot.append(clear, done);
+        pop.appendChild(foot);
+
+        // 浮层自身吃掉鼠标事件：点它内部的空白不该顺手把选中换掉
+        pop.onmousedown = (e) => e.stopPropagation();
+        pop.onclick = (e) => e.stopPropagation();
+
+        this.rootEl.appendChild(pop);
+        this.markPop = pop;
+        this.markPopId = n.id;
+        sync();
+        this.positionMarkPop();
+        // 标签是这个浮层里唯一需要打字的项，进来就把焦点给它
+        input.focus();
+        input.select();
+    }
+
+    /** 把浮层贴到它那个节点旁边（重渲染之后节点换了元素，要重新贴） */
+    private positionMarkPop() {
+        const pop = this.markPop;
+        if (!pop) return;
+        const el = this.markPopId ? this.byId.get(this.markPopId)?.el : null;
+        if (!el) {
+            this.closeMarkPopover();
+            return;
+        }
+        const r = el.getBoundingClientRect();
+        const host = this.rootEl.getBoundingClientRect();
+        const pw = pop.offsetWidth;
+        const ph = pop.offsetHeight;
+        // 默认贴在节点下方；下方放不下就翻到上方，左右再夹进可视区
+        let left = r.left - host.left;
+        let top = r.bottom - host.top + 6;
+        if (top + ph > host.height - 6) top = Math.max(6, r.top - host.top - ph - 6);
+        left = Math.max(6, Math.min(left, host.width - pw - 6));
+        pop.style.left = `${Math.round(left)}px`;
+        pop.style.top = `${Math.round(top)}px`;
+    }
+
+    private closeMarkPopover() {
+        this.markPop?.remove();
+        this.markPop = null;
+        this.markPopId = "";
+    }
+
+    /**
+     * 丢掉所有在途的乐观标记。     *
+     * 由外部在**撤销 / 重做之后**调用：那是内容被整体写回的时刻，
+     * 覆盖表里的值既已经过时，又永远等不到「DOM 追上来」的对齐
+     * （撤销是反方向的改动），只能靠 3 秒超时退休 —— 那 3 秒里画面上
+     * 挂着的就是一个已经被撤掉的标记。
+     */
+    forgetMarkOverlay() {
+        if (this.markOverlay.size === 0) return;
+        this.markOverlay.clear();
+        this.render();
+    }
+
+    /**
+     * 提交一次标记改动。
+     *
+     * 分两层：**先改本地**（节点立刻变样，不等内核），**再写内核**。
+     * 写回之后内核会回推 DOM、触发一次重渲染，那时 `mark` 会从块属性重新解析出来，
+     * 两边自然对齐 —— 所以这里不需要在内存里维护一份「标记真相」。
+     */
+    private commitMark(n: MMNode, mark: MMNodeMark) {
+        /* ⚠️ 必须**克隆**，不能直接用传进来的对象。
+         *
+         * 浮层里的 `draft` 是**反复复用的同一个对象**（点图标改 `draft.icon`、
+         * 输标签改 `draft.label`）。如果这里把它直接挂到 `n.mark` 上，
+         * 两者就是同一个引用 —— 下一次改 `draft` 会连 `n.mark` 一起改掉，
+         * 于是 `sameMark(n.mark, next)` 变成「自己和自己比」，恒等成立，
+         * 后续所有改动都被判成「没变」而直接 return：
+         * 表现就是**第一个操作（选图标）生效，之后选颜色、输标签全都没反应**。
+         * 实测（tests/kernel/diag-mark.mjs）就是这个症状。
+         */
+        const next = hasMark(mark) ? { ...mark } : undefined;
+        // 上一轮 render() 已经把整棵树重建过了，传进来的 `n` 可能已经是旧对象 ——
+        // 按块 ID 取当前那一个，别往一个已经不在树上的节点上写
+        const live = (n.id && this.byId.get(n.id)) || n;
+        if (sameMark(live.mark, next)) return;
+        live.mark = next;
+        // 自定义色要同时改 `n.color`，否则连线还是旧色（见 render 里的注释）
+        if (next?.color) live.color = next.color;
+        if (live.id) {
+            const id = live.id;
+            this.markOverlay.set(id, next ? { ...next } : null);
+            window.setTimeout(() => {
+                // 内核已经把 DOM 推回来、覆盖表对齐退休了 —— 那就不用做任何事
+                if (!this.markOverlay.has(id)) return;
+                // 否则说明写回没成：撤掉覆盖，退回旧样子。
+                // 宁可看到「没生效」，也不要让一个永远不会成真的标记留在画面上。
+                this.markOverlay.delete(id);
+                this.render();
+            }, 3000);
+        }
+        this.cb.onMarkChange(live, next ?? null);
+        this.render();
+    }
+
     private openNodeMenu(n: MMNode, event: MouseEvent) {
         const menu = this.makeMenu("mm-node-menu");
         const act = (kind: MMActionKind, opts?: MMActionExtra) => {
@@ -3266,37 +4092,49 @@ export class MindMapView {
             menu.addItem({ label: key ? `${label}    ${key}` : label, disabled, click });
         };
 
+        // 待办节点把「勾选」放在最前 —— 对它来说这是最常用的一下，
+        // 单独用一条分隔线跟下面的结构操作分开（状态 vs 结构，是两码事）
+        if (n.kind === "task") {
+            item(n.checked ? this.t("menu.markTodo", "标记为未完成") : this.t("menu.markDone", "标记为已完成"), "X", !n.id, () => this.toggleTaskCheck(n));
+            menu.addItem({ type: "separator" });
+        }
+
+        // 标记紧挨着文字编辑：它们都是「给这个节点加点信息」，不是结构操作
+        item(n.mark ? this.t("menu.editMark", "编辑标记（图标 / 标签 / 颜色）…") : this.t("menu.addMark", "添加标记（图标 / 标签 / 颜色）…"), "", !n.id, () =>
+            this.openMarkPopover(n),
+        );
+
         const rich = hasInlineFormat(n);
-        item(rich ? "回到原文编辑（保留格式）" : "编辑文字", "F2", !this.options.editable || !canEdit(n), () =>
+        item(rich ? this.t("menu.editInSource", "回到原文编辑（保留格式）") : this.t("menu.editText", "编辑文字"), "F2", !this.options.editable || !canEdit(n), () =>
             this.beginEdit(n),
         );
-        item("插入子节点", "Tab", false, () => act("insertChild"));
-        item("在下方插入", "Enter", false, () => act("insertSiblingAfter"));
+        item(this.t("menu.insertChild", "插入子节点"), "Tab", false, () => act("insertChild"));
+        item(this.t("menu.insertBelow", "在下方插入"), "Enter", false, () => act("insertSiblingAfter"));
         if (n.children.length > 0) {
-            item("聚焦此分支（只看这一支）", "Ctrl 双击", false, () => this.drillDown(n));
+            item(this.t("menu.focusBranchDesc", "聚焦此分支（只看这一支）"), this.t("tip.ctrlDblClick", "Ctrl 双击"), false, () => this.drillDown(n));
         }
         if (this.drillPath.length > 0) {
-            item("退出聚焦，回到全图", "Esc", false, () => this.drillTo(0));
+            item(this.t("menu.exitFocus", "退出聚焦，回到全图"), "Esc", false, () => this.drillTo(0));
         }
         menu.addItem({ type: "separator" });
-        item("上移", "Ctrl ↑", !canMoveUp(n), () => act("moveUp"));
-        item("下移", "Ctrl ↓", !canMoveDown(n), () => act("moveDown"));
-        item("降级为上一个节点的子节点", "Alt →", !canIndent(n), () => act("indent"));
-        item("升级为父节点的兄弟", "Alt ←", !canOutdent(n), () => act("outdent"));
+        item(this.t("act.moveUp", "上移"), "Ctrl ↑", !canMoveUp(n), () => act("moveUp"));
+        item(this.t("act.moveDown", "下移"), "Ctrl ↓", !canMoveDown(n), () => act("moveDown"));
+        item(this.t("menu.indentDesc", "降级为上一个节点的子节点"), "Alt →", !canIndent(n), () => act("indent"));
+        item(this.t("menu.outdentDesc", "升级为父节点的兄弟"), "Alt ←", !canOutdent(n), () => act("outdent"));
         menu.addItem({ type: "separator" });
         if (n.children.length > 0) {
-            item(n.folded ? `展开（${n.children.length} 个子节点）` : "折叠子节点", "空格", false, () => this.toggleFold(n));
+            item(n.folded ? this.t("menu.expandN", "展开（{n} 个子节点）", { n: n.children.length }) : this.t("tip.collapseChildren", "折叠子节点"), this.t("tip.space", "空格"), false, () => this.toggleFold(n));
         }
-        item("复制子树", "Ctrl C", false, () => {
+        item(this.t("menu.copySubtree", "复制子树"), "Ctrl C", false, () => {
             this.clipboard = serializeSubtree(n);
             void this.copyNodeText(n);
         });
-        item("快速复制", "Ctrl D", !n.id, () => act("duplicate"));
-        item("复制文字", "", false, () => void this.copyNodeText(n));
-        item("定位到编辑器", "", !n.id, () => this.cb.onLocate(n.id));
+        item(this.t("menu.quickCopy", "快速复制"), "Ctrl D", !n.id, () => act("duplicate"));
+        item(this.t("menu.copyText", "复制文字"), "", false, () => void this.copyNodeText(n));
+        item(this.t("menu.locateInEditor", "定位到编辑器"), "", !n.id, () => this.cb.onLocate(n.id));
         menu.addItem({ type: "separator" });
         item(
-            n.children.length > 0 ? `删除节点（含 ${n.children.length} 个子节点）` : "删除节点",
+            n.children.length > 0 ? this.t("menu.deleteNodeN", "删除节点（含 {n} 个子节点）", { n: n.children.length }) : this.t("menu.deleteNode", "删除节点"),
             "Delete",
             !canDelete(n),
             () => act("delete"),
@@ -3398,7 +4236,7 @@ export class MindMapView {
         const hit = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null)?.closest<HTMLElement>(
             ".mm-node",
         );
-        const target = hit ? this.byId.get(hit.dataset.nodeId ?? "") : null;
+        const target = hit ? this.byId.get(hit.dataset.mmId ?? "") : null;
 
         // 不能落在自己身上，也不能落进自己的子树
         if (!hit || !target || target === source || isAncestor(source, target)) {
@@ -3473,8 +4311,74 @@ export class MindMapView {
 
     private async copyNodeText(n: MMNode) {
         const ok = await copyText(n.text);
-        if (ok) showMessage("已复制节点文字");
-        else showMessage("复制失败", 4000, "error");
+        if (ok) showMessage(this.t("msg.nodeTextCopied", "已复制节点文字"));
+        else showMessage(this.t("msg.copyFailed", "复制失败"), 4000, "error");
+    }
+
+    /* ==================================================================== 状态过滤（P1-1） */
+
+    /** 切换过滤器并重渲染。视图会整体换形，所以重新取景一次 */
+    private setFilter(f: MMFilter) {
+        if (this.filter === f) return;
+        this.filter = f;
+        this.render(true);
+        // 筛选结果是空的时候，画面上只剩一个孤零零的根节点，很容易被当成「图坏了」。
+        // 明说一句，比让用户去猜好。
+        if (f !== "all" && this.filterHits === 0) {
+            showMessage(f === "done" ? this.t("msg.noDoneTask", "这张图里没有已完成的待办") : this.t("msg.noTodoTask", "这张图里没有未完成的待办"), 2400);
+        }
+    }
+
+    /**
+     * 把过滤器落到树上：算一遍「该留下谁」，写进每个节点的 `hidden`。
+     *
+     * 保留规则和主流大纲工具一致：**命中的节点 + 它的全部祖先**。
+     * 祖先必须留下，否则树就断了 —— 一个未完成的子任务总得挂在它那个
+     * （可能已完成的）父任务下面，不然用户根本看不出它为什么在这儿。
+     *
+     * 「命中」的判定对**非待办节点**是继承的：一个普通列表项算什么状态，
+     * 看它最近的那个待办祖先。理由是实际用法 —— 任务下面挂的说明、备注、子条目
+     * 本来就属于那条任务，任务没做完就不该把它们一起藏起来。
+     * 上面没有待办祖先的（纯散文节点）不继承任何状态，只在「全部」下出现。
+     *
+     * 必须在**布局之前**调用：布局只认 `kids`，而 `kids` 是按 `hidden` 算的。
+     */
+    private applyFilter(root: MMNode) {
+        const all = flatten(root);
+        const reset = () => {
+            for (const n of all) n.hidden = false;
+            this.filterHits = all.filter((n) => n.kind === "task").length;
+        };
+
+        if (this.filter === "all") return reset();
+
+        const tasks = all.filter((n) => n.kind === "task");
+        // 整张图一个待办都没有 —— 过滤器无从下手，索性整体不生效。
+        // （工具条上那组 chip 也会被 syncFilterGroup 收掉，所以正常情况下用户点不到。）
+        if (tasks.length === 0) return reset();
+
+        const want = this.filter === "done";
+        let hits = 0;
+        const walk = (n: MMNode, inherited: boolean | null): boolean => {
+            const state = n.kind === "task" ? !!n.checked : inherited;
+            let keep = state === want;
+            if (keep) hits++;
+            for (const c of n.children) if (walk(c, state)) keep = true;
+            n.hidden = !keep;
+            return keep;
+        };
+        walk(root, null);
+        // 根节点永远留着：全筛掉的话画布会变成纯空白，
+        // 用户看到的是「图没了」而不是「筛完了」，那是两回事
+        root.hidden = false;
+        this.filterHits = hits;
+    }
+
+    /** 同步过滤 chip 的高亮与整组的显隐 */
+    private syncFilterGroup() {
+        const hasTask = !!this.tree && flatten(this.tree).some((n) => n.kind === "task");
+        this.filterGroup.style.display = hasTask ? "" : "none";
+        for (const b of this.filterEls) b.classList.toggle("mm-on", b.dataset.filter === this.filter);
     }
 
     /* ==================================================================== 搜索 */
@@ -3491,6 +4395,13 @@ export class MindMapView {
             this.searchInput.value = "";
             this.searchHits = [];
             this.searchIdx = -1;
+            // 跨图结果也要一起清：搜索框都关了，留一块面板挂在右上角
+            // 会挡住画布，而且下一次打开时它还是旧内容
+            this.docHits = [];
+            this.docSearchSeq++;
+            window.clearTimeout(this.docSearchTimer);
+            this.renderDocResults();
+            this.updateSearchCount();
             this.applySearchMarks();
             this.rootEl.focus({ preventScroll: true });
         }
@@ -3522,6 +4433,10 @@ export class MindMapView {
         const needle = q.trim().toLowerCase();
         if (root && needle) {
             const walk = (n: MMNode) => {
+                // 被过滤器筛掉的节点不参与命中 ——
+                // 「只看未完成」+ 搜索的语义是「在我筛出来的范围里搜」，
+                // 否则会出现「计数说 3 条，画面上一个高亮都看不见」。
+                if (n.hidden) return;
                 if (n.id && this.searchHay(n).includes(needle)) this.searchHits.push(n.id);
                 n.children.forEach(walk);
             };
@@ -3531,6 +4446,45 @@ export class MindMapView {
         this.updateSearchCount();
         this.applySearchMarks();
         if (this.searchIdx >= 0) this.gotoHit();
+
+        // 跨图范围：本图的命中照旧画在画布上，另外异步补一份文档级结果
+        if (this.searchAll) this.runDocSearch(needle);
+        else {
+            this.docHits = [];
+            this.renderDocResults();
+        }
+    }
+
+    /**
+     * 跨图搜索：防抖 + 只认最后一次的返回。
+     *
+     * 每敲一个字都打一次 SQL 太浪费；而「慢的请求后到、把新结果盖掉」是
+     * 中文输入法连续输入时很容易撞上的真问题，所以用一个自增序号认领结果 ——
+     * 回来的不是最新那一次就直接丢掉。
+     */
+    private runDocSearch(needle: string) {
+        window.clearTimeout(this.docSearchTimer);
+        const seq = ++this.docSearchSeq;
+        if (!needle) {
+            this.docHits = [];
+            this.renderDocResults();
+            return;
+        }
+        this.docSearchTimer = window.setTimeout(() => {
+            const pending = this.cb.onSearchDoc?.(needle) ?? Promise.resolve([]);
+            void pending
+                .then((hits) => {
+                    if (seq !== this.docSearchSeq || this.destroyed) return;
+                    this.docHits = hits;
+                    this.renderDocResults();
+                })
+                .catch((err) => {
+                    if (seq !== this.docSearchSeq) return;
+                    console.warn("[mindmap] 跨图搜索异常", err);
+                    this.docHits = [];
+                    this.renderDocResults();
+                });
+        }, 220);
     }
 
     private stepSearch(delta: number) {
@@ -3542,8 +4496,16 @@ export class MindMapView {
     }
 
     private updateSearchCount() {
+        // 跨图范围下，计数报的是**文档级命中** —— 那才是这一轮搜索的主结果集，
+        // 本图的命中只是顺带画在画布上（可能 0 条而文档里有 20 条，
+        // 这时候显示「无结果」会让人以为搜错了）
+        if (this.searchAll) {
+            const n = this.docHits.length;
+            this.searchCount.textContent = !this.searchInput.value.trim() ? "" : n === 0 ? this.t("search.noResult", "无结果") : this.t("search.countN", "{n} 条", { n });
+            return;
+        }
         const n = this.searchHits.length;
-        this.searchCount.textContent = n === 0 ? (this.searchInput.value ? "无结果" : "") : `${this.searchIdx + 1}/${n}`;
+        this.searchCount.textContent = n === 0 ? (this.searchInput.value ? this.t("search.noResult", "无结果") : "") : `${this.searchIdx + 1}/${n}`;
     }
 
     /** 命中项可能在折叠的子树里，先展开祖先 */
@@ -3877,8 +4839,9 @@ export class MindMapView {
         const layoutMode = this.options.layout;
         const anchorX = layoutMode === "logic" ? vw * 0.3 : vw / 2;
         const anchorY = layoutMode === "tree" ? vh * 0.26 : vh / 2;
-        this.tx = this.frameAxis(anchorX - rx, w * this.scale, vw);
-        this.ty = this.frameAxis(anchorY - ry, h * this.scale, vh);
+        // ⚠️ 第四个参数不能省：`frameAxis` 钳的是画布边缘，而这里要的是内容边缘。
+        this.tx = this.frameAxis(anchorX - rx, w * this.scale, vw, LAYOUT_PAD_X * this.scale);
+        this.ty = this.frameAxis(anchorY - ry, h * this.scale, vh, LAYOUT_PAD_Y * this.scale);
         this.updateTransform();
     }
 
@@ -3891,16 +4854,28 @@ export class MindMapView {
      *
      * 钳制规则：
      *   装得下 → 居中（此时锚点没有意义，居中最好看）
-     *   装不下 → 夹进 [v - c - M, M]，保证视口被内容铺满，不出现「一边空一大片」
+     *   装不下 → 把**内容边缘**夹到离视口边 M，保证视口被内容铺满，
+     *            不出现「一边空一大片」
+     *
+     * ⚠️ `c` 是**画布**尺寸，而用户看到的是**内容** —— 画布在内容外侧还裹着一圈
+     * `pad` 的内边距（`LAYOUT_PAD_*`）。所以要判断「装不装得下」、要夹到 M 的，
+     * 都必须是 `c - pad * 2` 那一段。按画布算的后果实测过：内容宽 1231px、
+     * 视口 519px 时，画布左边缘被钉在 28px，可内容左边缘却在 28 + 72×0.55 ≈ 68px 处
+     * —— 左右各白空 68px，覆盖率只有 87%（可视区被吃掉两成半）。
+     * 换成按内容边缘夹之后，左空 28px、覆盖率 94.6%。
      *
      * @param want 按锚点算出来的期望平移量
-     * @param c    该轴上的内容尺寸（已乘缩放）
+     * @param c    该轴上的**画布**尺寸（已乘缩放）
      * @param v    该轴上的视口尺寸
+     * @param pad  画布内边距（已乘缩放），即画布边缘到内容边缘的距离
      */
-    private frameAxis(want: number, c: number, v: number): number {
+    private frameAxis(want: number, c: number, v: number, pad = 0): number {
         const M = 28;
-        if (c <= v - M * 2) return (v - c) / 2;
-        return Math.min(M, Math.max(v - c - M, want));
+        const content = c - pad * 2;
+        if (content <= v - M * 2) return (v - c) / 2;
+        // 内容装不下：把内容左边缘夹到 M（等价于画布左边缘夹到 M - pad），
+        // 内容右边缘夹到 v - M（等价于画布右边缘夹到 v - M + pad）。
+        return Math.min(M - pad, Math.max(v - c + pad - M, want));
     }
 
     /**
@@ -3938,12 +4913,22 @@ export class MindMapView {
         const M = 28;
         const cw = this.worldW * this.scale;
         const ch = this.worldH * this.scale;
+        // ⚠️ 「装不装得下」要拿**内容**尺寸判断，不是画布尺寸。
+        //    画布在内容外侧还裹着一圈内边距，用画布判断会漏掉一段约
+        //    `2 × pad × scale` 宽的窗口（本项目实测 79px）：内容明明装得下，
+        //    却因为画布超了而被判成「装不下」，视图不居中 —— 内容偏在一边、
+        //    另一侧白白空掉（实测 tx = -100、缩放 1.3856：内容占 0 ~ 384px，
+        //    视口 519px，右侧空 135px）。tx 偏得更多时就会把内容裁掉。
+        //    ⚠️ 但下面设置 `tx` 用的仍必须是**画布**宽：tx 是画布的平移量，
+        //       画布居中 = 内容居中（内边距两侧对称）。
+        const innerW = cw - LAYOUT_PAD_X * this.scale * 2;
+        const innerH = ch - LAYOUT_PAD_Y * this.scale * 2;
         let moved = false;
-        if (cw <= vw - M * 2) {
+        if (innerW <= vw - M * 2) {
             this.tx = (vw - cw) / 2;
             moved = true;
         }
-        if (ch <= vh - M * 2) {
+        if (innerH <= vh - M * 2) {
             this.ty = (vh - ch) / 2;
             moved = true;
         }

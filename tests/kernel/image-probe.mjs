@@ -14,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -193,14 +194,16 @@ try {
         true,
     );
     console.log("  加时间戳绕开缓存再加载:", JSON.stringify(bypassCache));
-
-    if (!process.env.MM_KEEP) {
-        const info = (await api("/api/block/getBlockInfo", { id: docId })).data;
-        await api("/api/filetree/removeDoc", { notebook: info.box, path: info.path });
-        console.log("\n已清理临时文档");
-    } else {
-        console.log("\nMM_KEEP=1，保留文档:", docId);
-    }
 } finally {
     await chrome.close();
+    /* ⚠️ 清理放 finally —— 放 try 末尾的话，中间任何一步抛异常（本支要上传资源、
+       造文档，抛点很多）都会跳过清理，在用户笔记本里留下「临时-图片探针-时间戳」。
+       删文档走 _doc-cleanup 的两步法（getPathByID → removeDoc），
+       直接传 {id} 会报「Field [notebook] is required」而被静默吞掉。 */
+    if (docId && !process.env.MM_KEEP) {
+        const ok = await removeDoc(api, docId);
+        console.log(ok ? "\n已清理临时文档" : "\n⚠️ 临时文档未能清理: " + docId);
+    } else if (docId) {
+        console.log("\nMM_KEEP=1，保留文档:", docId);
+    }
 }

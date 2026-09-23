@@ -1,4 +1,5 @@
 import type { MMNode, MMNodeKind } from "../types";
+import { ATTR_MARK, decodeMark } from "./marks";
 
 /**
  * Protyle DOM → 导图树模型
@@ -104,6 +105,15 @@ export function parseList(listEl: HTMLElement, path = ""): MMNode[] {
              * 不再需要插件自己维护一份 `custom-mindmap-fold`。
              */
             folded: li.getAttribute("fold") === "1",
+            /**
+             * 节点标记（图标 / 标签 / 自定义色）。
+             *
+             * 思源把块的自定义属性**原样渲染成块元素的属性**（`custom-mindmap`
+             * 在 `.list` 上就是这么读的），所以这里直接读 `.li` 上的同名属性即可，
+             * 不需要额外打一次 `/api/attr/getBlockAttrs`。
+             * 读不到 / 读坏了都返回 undefined（见 marks.ts 的宽容解析）。
+             */
+            mark: decodeMark(li.getAttribute(ATTR_MARK)),
             numbered,
             order,
             children,
@@ -259,6 +269,14 @@ function sanitizeByDom(html: string): string {
         if (ce !== null && ce !== "false") el.removeAttribute("contenteditable");
         el.removeAttribute("spellcheck");
         el.removeAttribute("data-render");
+        /*
+         * 行内块（图片 / 行内公式 / 行内块引用）自带 `data-node-id`。
+         * 留着就等于在导图里**又复制了一份同一个块 ID** —— 和 `.mm-node` 上
+         * 那个属性是同一个坑（详见 renderer.ts 里 createNodeEl 的注释）：
+         * 思源按 `[data-node-id]` 在全文档里查元素时不看可见性，会撞上我们这份副本，
+         * 把真实的大纲块插进导图里。ID 我们本来也不用（点击走 `.mm-txt` 上的委托）。
+         */
+        el.removeAttribute("data-node-id");
         // class 不能无差别删 —— KaTeX 的 .katex / .katex-html 靠它上样式。
         if (el.classList?.contains("protyle-wysiwyg--select")) el.classList.remove("protyle-wysiwyg--select");
     });

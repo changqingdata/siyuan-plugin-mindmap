@@ -9,7 +9,8 @@
  * 覆盖：
  *   1. P0-2 乐观占位      按 Tab 加子节点 → 过程中确实出现过 .mm-ghost
  *   2. P0-2 失败反馈      顶层节点按 Alt+← 升级（必然失败）→ 出现 .mm-node.mm-error
- *   3. P0-3 视图跟文档    切换布局 → 块属性 custom-mindmap-view 写入；重载后保持
+ *   3. P0-3 视图跟文档    切换布局 → 块属性 custom-mindmap-view 写入；重载后保持；
+ *                        「恢复本列表的默认视图」真的把画面拉回全局默认（不是只弹 toast）
  *   4. P0-1 批量操作条    选中 ≥2 个 → .mm-batch 浮出；批量折叠真的折了
  *   5. P0-1 批量整体回滚  批量删除 → 节点数归零 → Ctrl+Z 还原
  *   6. P1-1 悬停预览      折叠节点后悬停珠子 → 浮出 .mm-preview 且列出子节点
@@ -19,7 +20,8 @@
  *  10. P2-1 双向高亮      导图选中节点 → 大纲对应 .li 得到 mm-outline-hit
  *  11. P2-3 演示模式      进入后逐层展开、方向键推进、退出后**大纲 kramdown 一字未改**
  *  12. P2-5 收拢动画      折叠时出现过 .mm-node.mm-collapsing
- *  13. P2-2 导出增强      导出菜单里出现「Markdown 大纲」「复制为图片」
+ *  13. P2-2 导出增强      真点菜单 → 拦下载 → 验产物（SVG 尺寸/连线层/文字、PNG 魔数/2 倍分辨率、
+ *                         markdown 首行与缩进、只导出选中的裁剪确实更小）
  *
  * 全程用自己新建的临时文档，跑完删掉。
  *
@@ -295,6 +297,12 @@ try {
     await page.press("Escape");
     await page.press("Delete");
     await sleep(900);
+    /* ⚠️ 收尾也要断言。这里原先**只做不验** —— 而它恰恰隐性依赖焦点：
+       `Escape` 退出编辑态后若焦点没回到导图，`Delete` 就没人接、静默失效。
+       修 `finish()` 的焦点归还时才看出这个洞（当时两处收尾其实一直没生效，
+       只是后面的断言各自取基线，没被带出来）。 */
+    const sClean = await page.eval(STATE);
+    ok(sClean.total === s0.total, "收尾：刚插入的节点已撤掉（否则后面计数会带偏）", `${s1.total} → ${sClean.total}`);
 
     /* ============================================================ 2. P0-2 失败反馈 */
     console.log("\n[2] P0-2 失败反馈（在原节点上打红边）");
@@ -335,6 +343,59 @@ try {
         const r = b.getBoundingClientRect();
         return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
     })()`, { settle: 500 });
+
+    /* --- 3b. 「恢复本列表的默认视图」真的把画面拉回全局默认（审计扫出的零命中入口） ---
+     *
+     * 这条来自静态覆盖审计：`恢复本列表的默认视图` 从没被任何断言碰过。
+     * 静态读代码就能看出问题 —— 它的实现是
+     *     for (const k of Object.keys(this.prefs)) this.forgetPref(k);
+     *     this.applyViewPrefs({});
+     * 而 `applyViewPrefs` 只覆盖**显式给出**的项（`if (prefs.layout) …`），
+     * 空对象什么都不覆盖 → `prefs` 清了、`options` 还留着旧值 → `render(true)` 画出来还是旧布局。
+     * 结果就是「已恢复默认视图」的 toast 弹了，**画面纹丝不动**。
+     *
+     * ⚠️ 判据必须盯**画面**（分段控件高亮 + 块属性），不能只盯 toast ——
+     *    只盯 toast 的话这个 bug 会稳稳地绿着。 */
+    await clickExpr(page, `(() => {
+        const b = ${ROOT}.querySelector('.mm-seg button[data-layout="mind"]');
+        const r = b.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`, { settle: 400 });
+    const a3b = await waitFor(async () => {
+        const a = await attrs(listA);
+        return String(a["custom-mindmap-view"] || "").includes("layout=mind") ? a : null;
+    }, { label: "恢复前：mind 偏好已落进块属性" });
+    const segBefore3b = (await page.eval(STATE)).seg;
+    ok(segBefore3b === "mind" && !!a3b, "（前置）先把布局改成 mind 并等偏好落盘",
+        `seg=${segBefore3b}｜${a3b?.["custom-mindmap-view"] ?? "(空)"}`);
+
+    await clickExpr(page, toolAt("视图选项"), { settle: 450 });
+    const c3b = await page.eval(`(() => {
+        const it = [...document.querySelectorAll('.b3-menu .b3-menu__item')]
+            .find((x) => (x.textContent || '').trim().includes('恢复本列表的默认视图'));
+        if (!it) return 'no-item';
+        if ([...it.classList].some((c) => /disabled/.test(c))) return 'disabled';
+        const r = it.getBoundingClientRect();
+        const o = { bubbles: true, cancelable: true, clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2) };
+        it.dispatchEvent(new MouseEvent('mousedown', o));
+        it.dispatchEvent(new MouseEvent('mouseup', o));
+        it.click();
+        return 'clicked';
+    })()`);
+    await sleep(800);
+    const segAfter3b = (await page.eval(STATE)).seg;
+    ok(c3b === 'clicked', "「恢复本列表的默认视图」在有偏好时是可点的（没被 disabled）", c3b);
+    ok(segAfter3b === "logic", "★ 点完之后画面真的回到了全局默认布局（不是只弹个 toast）",
+        `mind → ${segAfter3b}｜期望 logic`);
+    const a3bAfter = await waitFor(async () => {
+        const a = await attrs(listA);
+        const v = String(a["custom-mindmap-view"] || "");
+        // ⚠️ 属性被整个删掉时读回来是空串，而空串是 falsy —— 直接返回它会让
+        //    waitFor 以为「还没等到」而白等满 4 秒。返回一个真值哨兵。
+        return v.includes("layout=mind") ? null : (v || "(属性已删除)");
+    }, { label: "块属性里的 mind 偏好被清掉" });
+    ok(!String(a3bAfter || "").includes("layout=mind"),
+        "块属性里的 layout 偏好也被清掉了（下次打开回默认）", String(a3bAfter || "(属性已删除)"));
 
     /* ============================================================ 4. P0-1 批量操作条 */
     console.log("\n[4] P0-1 批量操作条");
@@ -438,9 +499,13 @@ try {
     await page.press("Tab");
     await sleep(900);
     ok((await page.eval(WATCHED("fresh"))) > 0, "新插入的节点带高亮描边");
+    // 收尾同样要验（原因见 [1] 里那段注释：Escape → Delete 隐性依赖焦点）
+    const beforeClean = (await page.eval(STATE)).total;
     await page.press("Escape");
     await page.press("Delete");
     await sleep(900);
+    const afterClean = (await page.eval(STATE)).total;
+    ok(afterClean === beforeClean - 1, "收尾：刚插入的节点已撤掉", `${beforeClean} → ${afterClean}`);
 
     /* ============================================================ 12. P2-5 收拢动画 */
     console.log("\n[12] P2-5 折叠收拢动画");
@@ -549,11 +614,166 @@ try {
     /* ============================================================ 13. P2-2 导出增强 */
     // 放在演示模式**之后**：菜单一旦浮出会抢走键盘，而演示模式整段都靠方向键驱动。
     // 顺序反过来的话，「方向键没反应」会被误判成演示模式坏了。
+    //
+    // ★ 这一段原来是「只验菜单里有没有这两个字」—— 典型的「有实现、没断言」：
+    //   `导出 PNG` / `导出 SVG` / `导出 Markdown 大纲` 三条链路一次都没被跑过。
+    //   而导出恰好是最容易「点了没反应 / 导出一张空白图」的一类功能：
+    //   `buildSvg` 要把主题变量固化、把图片转 data URI、把宿主 CSS 变量内联，
+    //   `renderPngBlob` 还要把含 `foreignObject` 的 SVG 光栅化 —— 每一环都可能静默失败。
+    //   现在改成**真的点下去**，用「拦 `URL.createObjectURL` + 拦 `a.click()`」
+    //   把产物截下来看内容，不去碰真实下载目录。
     console.log("\n[13] P2-2 导出增强");
     await clickExpr(page, toolAt("导出图片"), { settle: 500 });
     const menu13 = await page.eval(`document.body.innerText || ''`);
     ok(menu13.includes("Markdown 大纲"), "导出菜单里有「导出 Markdown 大纲」");
     ok(menu13.includes("复制为图片"), "导出菜单里有「复制为图片到剪贴板」");
+    await page.press("Escape");
+    await sleep(250);
+
+    /* ---- 拦下载：把产物留在页内，别真的落到磁盘 ---- */
+    await page.eval(`(() => {
+        window.__dl = [];
+        window.__dlNames = [];
+        if (!window.__dlHooked) {
+            window.__dlHooked = true;
+            const orig = URL.createObjectURL.bind(URL);
+            URL.createObjectURL = (b) => { window.__dl.push(b); return orig(b); };
+            // 只拦「程序化 .click()」——真实鼠标事件不经过这里，所以菜单照点不误
+            HTMLAnchorElement.prototype.click = function () { window.__dlNames.push(this.download || ''); };
+        }
+        return 'ok';
+    })()`);
+    const resetDl = () => page.eval(`(() => { window.__dl = []; window.__dlNames = []; return 'ok'; })()`);
+    /** 点导出菜单里的一项（合成事件，跟设置面板那套一致） */
+    const clickExportItem = (text) =>
+        page.eval(`(() => {
+            const it = [...document.querySelectorAll('.b3-menu .b3-menu__item')].find((x) => (x.textContent || '').trim().includes(${JSON.stringify(text)}));
+            if (!it) return 'no-item';
+            const r = it.getBoundingClientRect();
+            const o = { bubbles: true, cancelable: true, clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2) };
+            it.dispatchEvent(new MouseEvent('mousedown', o));
+            it.dispatchEvent(new MouseEvent('mouseup', o));
+            it.click();
+            return 'clicked';
+        })()`);
+    /** 读回被拦下的 Blob：SVG 读文本，PNG 读文件头魔数 */
+    const readDl = () =>
+        page.eval(
+            `(async () => {
+                const out = { names: (window.__dlNames || []).slice(), blobs: [] };
+                for (const b of window.__dl) {
+                    if (/svg/.test(b.type)) {
+                        const t = await b.text();
+                        out.blobs.push({
+                            type: b.type, size: b.size, isSvg: true,
+                            width: Number((t.match(/width="(\\d+)"/) || [])[1] || 0),
+                            height: Number((t.match(/height="(\\d+)"/) || [])[1] || 0),
+                            hasEdges: t.includes('class="mm-edges"'),
+                            nodeEls: (t.match(/class="mm-node/g) || []).length,
+                            // ⚠️ 必须先把 <style> 段剥掉再取文字 —— 内联的 PLUGIN_CSS 有几十 KB，
+                            //    直接 replace(/<[^>]*>/g) 的话取到的全是 CSS（第一次就踩了这个坑，
+                            //    「SVG 里带着节点文字」假红）。
+                            text: t.replace(/<style[\\s\\S]*?<\\/style>/g, ' ').replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim().slice(0, 200),
+                        });
+                    } else if (/markdown|text/.test(b.type)) {
+                        out.blobs.push({ type: b.type, size: b.size, isMd: true, text: (await b.text()).slice(0, 200) });
+                    } else {
+                        const u = new Uint8Array(await b.arrayBuffer());
+                        // PNG 的尺寸藏在 IHDR 里：8 字节签名 + 4 字节块长 + 4 字节 "IHDR"，
+                        // 紧跟着就是 4 字节宽 + 4 字节高（都是**大端**）。
+                        // 不读这个就没法验「2 倍高清导出」到底生没生效 —— 魔数只能证明「是个 PNG」。
+                        const be32 = (o) => ((u[o] << 24) | (u[o + 1] << 16) | (u[o + 2] << 8) | u[o + 3]) >>> 0;
+                        out.blobs.push({
+                            type: b.type, size: b.size,
+                            magic: [...u.slice(0, 8)].map((n) => n.toString(16).padStart(2, '0')).join(''),
+                            head: [...u.slice(0, 4)].map((n) => String.fromCharCode(n)).join(''),
+                            isPng: u[0] === 0x89 && u[1] === 0x50 && u[2] === 0x4e && u[3] === 0x47,
+                            width: u.length >= 24 ? be32(16) : 0,
+                            height: u.length >= 24 ? be32(20) : 0,
+                        });
+                    }
+                }
+                return out;
+            })()`,
+            true,
+        );
+    const worldWH = await page.eval(`(() => {
+        const w = ${ROOT} && ${ROOT}.querySelector('.mm-world');
+        return w ? { w: Math.ceil(parseFloat(w.style.width) || 0), h: Math.ceil(parseFloat(w.style.height) || 0) } : null;
+    })()`);
+
+    /* ---- ① 导出 SVG ---- */
+    await resetDl();
+    await clickExpr(page, toolAt("导出图片"), { settle: 400 });
+    const c13svg = await clickExportItem("导出 SVG");
+    await sleep(1600);
+    const dlSvg = await readDl();
+    const svg = dlSvg.blobs.find((b) => b.isSvg);
+    ok(c13svg === 'clicked' && !!svg, "「导出 SVG」真的产出了一个 SVG Blob（不只是菜单里有个字）", `${c13svg}｜文件名 ${dlSvg.names.join(",") || "(无)"}`);
+    ok(!!svg && svg.width > 0 && svg.height > 0, "SVG 带真实画布尺寸（不是 0×0 的空壳）", `${svg?.width}×${svg?.height}｜世界坐标 ${worldWH?.w}×${worldWH?.h}`);
+    ok(!!svg && worldWH && svg.width === worldWH.w && svg.height === worldWH.h, "SVG 尺寸 = 画布世界尺寸（导出没被视口缩放带偏）", `${svg?.width}×${svg?.height} vs ${worldWH?.w}×${worldWH?.h}`);
+    ok(!!svg && svg.hasEdges && svg.nodeEls > 0, "SVG 里既有连线层也有节点元素", `连线层 ${svg?.hasEdges}｜节点 ${svg?.nodeEls} 个`);
+    ok(!!svg && /分支甲|交互增强验证/.test(svg.text), "SVG 里带着节点文字（不是一张空图）", (svg?.text || "").slice(0, 50) + "…");
+
+    /* ---- ② 导出 PNG（走 foreignObject → canvas 光栅化，最容易静默失败的一环） ---- */
+    await resetDl();
+    await clickExpr(page, toolAt("导出图片"), { settle: 400 });
+    const c13png = await clickExportItem("导出 PNG");
+    await sleep(2600);
+    const dlPng = await readDl();
+    const png = dlPng.blobs.find((b) => b.type === "image/png");
+    ok(c13png === 'clicked' && !!png, "「导出 PNG」真的产出了一个 PNG Blob", `${c13png}｜文件名 ${dlPng.names.join(",") || "(无)"}`);
+    ok(!!png && png.magic === "89504e470d0a1a0a", "PNG 文件头是合法的 PNG 魔数（不是空 Blob 或错误编码）", `魔数 ${png?.magic}`);
+    ok(!!png && png.size > 2000, "PNG 有实际内容（>2KB）", `${Math.round((png?.size || 0) / 1024)} KB`);
+    // `renderPngBlob(root, scale = 2, …)` 与 `exportPng(…, 2, …)` 都明确传了 2 倍，
+    // 所以「导出 PNG」的产物必须是画布世界尺寸的 2 倍 —— 否则那个 scale 参数就是摆设。
+    // （这条断言第一版没有，于是 `Math.min(scale, …, 1)` 把 2 倍吃掉这件事藏了很久。）
+    // ⚠️ 凡是解引用产物字段的断言，都必须先 `!!x &&` 兜一层。
+    //    这里第一版直接写了 `png.width`，于是「PNG 导出失败」时不是**报红**，
+    //    而是抛 `TypeError: Cannot read properties of undefined` 把整支脚本打断 ——
+    //    后面 20 多条断言一条都看不到。测试在失败时失去诊断力，比失败本身更糟。
+    const expect2x = worldWH && worldWH.w * 2 <= 8192 && worldWH.h * 2 <= 8192;
+    ok(!expect2x || (!!png && png.width === worldWH.w * 2 && png.height === worldWH.h * 2),
+        "导出 PNG 是 2 倍分辨率（高清导出真的高清）",
+        `${png?.width}×${png?.height} vs 期望 ${expect2x ? `${worldWH.w * 2}×${worldWH.h * 2}` : "（超出 8192 上限，跳过）"}`);
+    ok(await page.eval(`(window.__mmErrors || []).length`) === 0, "导出过程中页面没有抛错", JSON.stringify(await page.eval(`window.__mmErrors || []`)));
+
+    /* ---- ③ 导出 Markdown 大纲 ---- */
+    await resetDl();
+    await clickExpr(page, toolAt("导出图片"), { settle: 400 });
+    const c13md = await clickExportItem("导出 Markdown 大纲");
+    await sleep(1200);
+    const dlMd = await readDl();
+    const mdBlob = dlMd.blobs.find((b) => b.isMd);
+    // `outlineMarkdown()` 的产物是**纯大纲**（只有列表项，没有 `#` 标题行）——
+    // 标题只用来当文件名。第一版断言写成「以 # 开头」，是断言写错了，不是功能错了。
+    const mdFirst = (mdBlob?.text || "").trim().split("\n")[0] || "";
+    ok(c13md === 'clicked' && !!mdBlob && /^- /.test(mdFirst), "「导出 Markdown 大纲」产出了 markdown 大纲文本", `${c13md}｜首行「${mdFirst.slice(0, 24)}」`);
+    ok(!!mdBlob && /^- .*\n\s+- /m.test(mdBlob.text), "markdown 里保留了层级缩进（不是拍平的一列）", `${mdBlob?.size} 字节`);
+
+    /* ---- ④ 只导出选中：裁剪真的生效（尺寸应当小于全图） ---- */
+    // ⚠️ 「只导出选中」走的是 `doExport("png", …)`，产物是 **PNG**，不是 SVG。
+    //    第一版断言在这里 `find((b) => b.isSvg)`，于是永远是 undefined，
+    //    报出来是 `undefined×undefined ≤ 907×489` —— 断言写错，不是功能错。
+    await clickExpr(page, nodeAt(1), { settle: 400 });
+    const sel13 = await page.eval(`(() => { const r = ${ROOT}; return r ? r.querySelectorAll('.mm-node.mm-sel').length : 0; })()`);
+    await resetDl();
+    await clickExpr(page, toolAt("导出图片"), { settle: 400 });
+    const c13crop = await clickExportItem("只导出选中");
+    await sleep(2400);
+    const dlCrop = await readDl();
+    const cropPng = dlCrop.blobs.find((b) => b.isPng);
+    ok(sel13 > 0, "（前置）先选中一个节点，「只导出选中」才可点", `选中 ${sel13} 个`);
+    ok(c13crop === 'clicked' && !!cropPng, "「只导出选中」真的产出了一个 PNG", `${c13crop}｜文件名 ${dlCrop.names.join(",") || "(无)"}`);
+    ok(!!cropPng && !!png && cropPng.width > 0 && cropPng.width <= png.width && cropPng.height <= png.height,
+        "只导出选中：裁剪后的画布不超过全图", `${cropPng?.width}×${cropPng?.height} ≤ ${png?.width}×${png?.height}`);
+    // 「不超过」还不够 —— 少写一个参数就会退化成「偷偷导了全图」而仍然通过。
+    // 所以再钉一条**严格更小**：至少一个方向真的被裁掉了。
+    ok(!!cropPng && !!png && (cropPng.width < png.width || cropPng.height < png.height),
+        "只导出选中：至少一个方向真的被裁掉了（不是偷偷导全图）", `${cropPng?.width}×${cropPng?.height} vs ${png?.width}×${png?.height}`);
+
+    // 撤掉下载拦截，别影响后续段落（后面还有拖拽 / 小地图）
+    await page.eval(`(() => { window.__dl = []; window.__dlNames = []; return 'ok'; })()`);
     await page.press("Escape");
     await sleep(250);
 

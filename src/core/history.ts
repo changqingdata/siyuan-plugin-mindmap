@@ -40,6 +40,15 @@ export interface HistoryEntry {
     before: string;
     /** 操作后的整块快照（重做用） */
     after: string;
+    /**
+     * 块属性改动（目前只有「设置 / 清除标记」会用到）。
+     *
+     * 为什么不能只靠 kramdown 快照：实测（`tests/kernel/probe-kramdown-ial.mjs`）
+     * `updateBlock(dataType:"markdown")` **保留块 ID，但会把自定义块属性丢掉** ——
+     * 而 kramdown 的 IAL 里明明是有这个属性的（读得到、写不回）。
+     * 所以属性类的改动必须在快照之外**单独带一份值**，还原时补写一次。
+     */
+    attrs?: { id: string; before: string | null; after: string | null };
 }
 
 export class History {
@@ -66,6 +75,11 @@ export class History {
 
     get canRedo(): boolean {
         return this.redoStack.length > 0;
+    }
+
+    /** 撤销栈深度（诊断面板用：Ctrl+Z「没反应」十有八九是栈空了） */
+    get depth(): number {
+        return this.undoStack.length;
     }
 
     /** 取出一条待撤销的记录，并把它挪到重做栈 */

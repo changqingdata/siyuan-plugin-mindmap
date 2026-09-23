@@ -5,7 +5,7 @@
  * 由 tests/visual.mjs 打包成单个 js，再由同目录的 visual.html 加载。
  */
 import { MindMapView } from "../src/core/renderer";
-import type { MMConfig } from "../src/types";
+import type { MMBatchKind, MMConfig, MMNodeMark, MMViewPrefs } from "../src/types";
 import { DEFAULT_CONFIG } from "../src/types";
 
 interface Spec {
@@ -115,10 +115,41 @@ interface Recorder {
     exits: number;
     /** Ctrl+Z / Ctrl+Y 被问到的时候，插件是怎么答的（"undo" / "redo"） */
     history: string[];
+    /**
+     * 下面这几组是「产品侧加了回调、验证页却一直没接」的（TS 报
+     * 「is missing the following properties from type 'ViewCallbacks'」才发现）。
+     *
+     * ⚠️ 不要图省事写成空函数 `() => {}`：那等于把这些路径重新藏回暗处 ——
+     *    接上并记下来，它们才会出现在 `report()` 里，将来也能被断言。
+     */
+    /** 批量操作：`种类×节点数` */
+    batch: string[];
+    /** 节点标记：`id=标记名`，清除时标记名为 "null" */
+    marks: string[];
+    /** 视图偏好（布局 / 主题 / 连线 / 缩放）写回请求 */
+    prefs: MMViewPrefs[];
+    /** 请求打开块（双链目标） */
+    opened: string[];
+    /** 请求「回到源列表里编辑」的节点 id */
+    editInSource: string[];
 }
 
 function newRecorder(): Recorder {
-    return { actions: [], folds: [], renames: [], layouts: [], locateIds: [], fullscreen: 0, exits: 0, history: [] };
+    return {
+        actions: [],
+        folds: [],
+        renames: [],
+        layouts: [],
+        locateIds: [],
+        fullscreen: 0,
+        exits: 0,
+        history: [],
+        batch: [],
+        marks: [],
+        prefs: [],
+        opened: [],
+        editInSource: [],
+    };
 }
 
 /**
@@ -128,6 +159,27 @@ function newRecorder(): Recorder {
  * 两条分支都要测，所以这里做成可切换的。
  */
 let historyHandled = false;
+
+/**
+ * 假的「内核写回」。
+ *
+ * 折叠态的真相源是**大纲自己**（解析器读 `.li[fold="1"]`），写回链路是
+ * `onFoldChange` → 内核 → DOM 更新。验证页没有内核，如果只把回调记下来、
+ * 不落到假 DOM 上，那么 `toggleFold` 之后的每一次 `render()` 重新解析都会把
+ * `folded` 读回 false —— 表现成「按空格只会折叠、永远展不开」，
+ * 也就是 `序列=[true,true]`。这里补上写回这一步，让假大纲与真思源行为一致。
+ *
+ * ⚠️ 不要改用「把折叠态记进覆盖表（`getFoldOverlay`）」来绕过。
+ *    覆盖表是**临时**的：生产侧内核把 DOM 更新回来之后它就被清掉了。
+ *    在验证页里它会永远留在表上，等于凭空多出第二个折叠真相源 ——
+ *    以后真有「覆盖表没被清掉」的 bug，这里反而验不出来。
+ */
+function writeFoldBack(id: string, folded: boolean) {
+    const li = document.querySelector<HTMLElement>(`.li[data-node-id="${id}"]`);
+    if (!li) return;
+    if (folded) li.setAttribute("fold", "1");
+    else li.removeAttribute("fold");
+}
 
 function mount(
     host: HTMLElement,
@@ -148,15 +200,35 @@ function mount(
     const view = new MindMapView(
         list,
         config,
-        new Set<string>(),
+        // ⚠️ 第 3 个参数是 `() => ReadonlyMap<string, boolean>`（折叠覆盖表），
+        //    不是早年的 `Set<string>`。产品代码改签名时这里没跟上 ——
+        //    而 tsconfig 的 include 只有 `src/**`，本文件不在类型检查范围内，
+        //    于是它静默烂掉：页面照样能渲染出导图，但 `report()` 之前就抛
+        //    `this.getFoldOverlay is not a function`，`npm run visual` 只会
+        //    干巴巴地说「页面上没有找到 #report」。
+        //    验证页的写回是同步的，不存在「内核还没更新回来」的空窗，
+        //    所以覆盖表恒空 —— 这正是它该有的样子（见 writeFoldBack 的注释）。
+        () => new Map<string, boolean>(),
         {
-            onFoldChange: (id, folded) => void rec.folds.push({ id, folded }),
+            onFoldChange: (id, folded) => {
+                rec.folds.push({ id, folded });
+                writeFoldBack(id, folded);
+            },
             onLocate: (id) => void rec.locateIds.push(id),
+            onEditInSource: (node) => void rec.editInSource.push(node.id ?? ""),
             onExit: () => void (rec.exits += 1),
             onLayoutChange: (k) => void rec.layouts.push(k),
             onFullscreen: () => void (rec.fullscreen += 1),
             onRename: (node, text) => void rec.renames.push({ id: node.id ?? "", text }),
             onNodeAction: (kind, node) => void rec.actions.push({ kind, text: node.text }),
+            onBatchAction: (kind: MMBatchKind, nodes) =>
+                void rec.batch.push(`${kind}×${nodes.length}`),
+            onViewPrefs: (prefs) => void rec.prefs.push(prefs),
+            onOpenBlock: (id) => void rec.opened.push(id),
+            onMarkChange: (node, mark: MMNodeMark | null) =>
+                void rec.marks.push(
+                    `${node.id ?? ""}=${mark ? mark.icon || mark.label || mark.color || "?" : "null"}`,
+                ),
             onHistory: (redo) => {
                 rec.history.push(redo ? "redo" : "undo");
                 return historyHandled;
@@ -517,7 +589,38 @@ function report(): Record<string, unknown> {
             }),
         });
     });
-    return { views: out, keyboard: keyboardProbe() };
+    return { views: out, keyboard: keyboardProbe(), callbacks: summarizeCallbacks() };
+}
+
+/**
+ * 把每个视图收到的回调汇总成一行行文本，随报告一起 dump 出去。
+ *
+ * 为什么要有这个：产品侧陆续加了回调（`onBatchAction` / `onMarkChange` /
+ * `onViewPrefs` / `onOpenBlock` / `onEditInSource`），验证页却一直没接 ——
+ * 直到给 `tests/**` 加上类型检查才报出来。
+ * 接上之后如果只是记进数组、不进报告，那还是「看不见」：
+ * **dump 出来的 DOM 里得有它们，才算真的没被藏起来。**
+ *
+ * ⚠️ 它在 `keyboardProbe()` **之后**求值（对象字面量从左到右求值）——
+ *    键盘探针自己会触发一批回调，放在它前面就只能看到探针之前的空账。
+ */
+function summarizeCallbacks(): Array<Record<string, unknown>> {
+    return recs.map((r, i) => ({
+        view: i,
+        actions: r.actions.map((a) => a.kind),
+        folds: r.folds.map((f) => f.folded),
+        renames: r.renames.length,
+        layouts: r.layouts,
+        locateIds: r.locateIds.length,
+        fullscreen: r.fullscreen,
+        exits: r.exits,
+        history: r.history,
+        batch: r.batch,
+        marks: r.marks,
+        prefs: r.prefs,
+        opened: r.opened,
+        editInSource: r.editInSource,
+    }));
 }
 
 /**

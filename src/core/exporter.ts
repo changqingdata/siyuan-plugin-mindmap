@@ -219,6 +219,38 @@ export async function exportPng(rootEl: HTMLElement, title: string, scale = 2, c
 /**
  * 把当前导图光栅化成 PNG。
  * 导出文件与「复制到剪贴板」共用同一条链路，只是最后的去处不同。
+ *
+ * ## ⚠️⚠️ 这里**必须**用 `data:` URL，不能用 `blob:` URL（实测踩过，且是致命的）
+ *
+ * 曾经写的是 `URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }))`，
+ * 看起来完全正常，**但 `canvas.toBlob` 会直接抛**：
+ *
+ * ```
+ * Failed to execute 'toBlob' on 'HTMLCanvasElement':
+ *   Tainted canvases may not be exported.
+ * ```
+ *
+ * 于是 `导出 PNG` 与 `复制为图片到剪贴板` **全线失败**，用户只看到一个 4 秒的
+ * 「导出失败」提示。这条链路从写出来到被发现，**一次都没被真机跑过**
+ * （原来的测试只验了「导出菜单里有这两个字」）—— 典型的「有实现、没断言」。
+ *
+ * **根因**（`tests/kernel/probe-png-export.mjs` 的最小对照，不是推断）：
+ * Chromium 把「SVG 当图片加载」时，只要 SVG 里含 `<foreignObject>`，
+ * 画布就会被判定为**被跨源数据污染**，`toBlob` / `getImageData` 全部抛 `SecurityError`。
+ * 与内容无关 —— 120×60、一行文字的 `<foreignObject>` 同样触发；
+ * 而纯 `<rect>`、`<text>`、`@font-face url(...)` 都正常。
+ * 与无头 / GPU 也无关（这是安全判定，不是渲染判定）。
+ *
+ * **修法**：同一份 SVG，只把图片源从 `blob:` 换成 `data:`，污染判定就消失了。
+ * 实测（同一个含 `foreignObject` 的 SVG）：
+ *
+ * | 图片源 | 结果 |
+ * | --- | --- |
+ * | `blob:` URL | ❌ toBlob 抛 SecurityError |
+ * | `data:` URL（encodeURIComponent） | ✓ 正常产出 |
+ * | `data:` URL（base64） | ✓ 正常产出 |
+ *
+ * 顺带一提：`exportSvg` 走的是下载，不经过 canvas，所以那边用 blob URL 没问题。
  */
 export async function renderPngBlob(rootEl: HTMLElement, scale = 2, crop?: ExportCrop): Promise<Blob | null> {
     const svg = await buildSvg(rootEl, crop);
@@ -227,23 +259,29 @@ export async function renderPngBlob(rootEl: HTMLElement, scale = 2, crop?: Expor
     const W = size.w;
     const H = size.h;
 
-    // 限制画布总像素，避免超出浏览器上限
+    // 限制画布边长，避免超出浏览器上限（超过 8192 的画布会静默变空白）
+    //
+    // ⚠️ 这里**不能**再 `Math.min(…, 1)`。原来的写法是
+    //     `Math.min(scale, maxSide / Math.max(W, H), 1)`
+    // 尾部那个 `1` 把倍率封死在 ≤ 1，于是 `scale` 参数彻底成了摆设：
+    // 两个调用点都明确传了 2（`exportPng(…, 2, crop)` 与 `renderPngBlob(rootEl)` 的默认值），
+    // 但导出的 PNG 永远和画布 1:1 —— 「高清导出」从来没高清过。
+    // 这是一条**没有断言就永远发现不了**的缺陷：魔数、体积、有没有报错，全都正常。
+    // （`diag-canvas-v2.mjs` 的「导出 PNG 是 2 倍分辨率」就是为它钉的。）
     const maxSide = 8192;
-    const s = Math.min(scale, maxSide / Math.max(W, H), 1);
+    const s = Math.min(scale, maxSide / Math.max(W, H));
 
-    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
-    try {
-        const img = await loadImage(url);
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(W * s));
-        canvas.height = Math.max(1, Math.round(H * s));
-        const ctx = canvas.getContext("2d");
-        if (!ctx) throw new Error("无法创建 canvas 上下文");
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        return await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
-    } finally {
-        URL.revokeObjectURL(url);
-    }
+    // 见上面的长注释：data URL 是必须的，不是风格选择。
+    // 用 encodeURIComponent 而不是 base64 —— 少一次 btoa 的编码开销，且不用处理
+    // 非 Latin-1 字符（SVG 里有中文节点文字，直接 btoa 会抛 InvalidCharacterError）。
+    const img = await loadImage("data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(W * s));
+    canvas.height = Math.max(1, Math.round(H * s));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("无法创建 canvas 上下文");
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
 }
 
 /** 把导图序列化成 Markdown 大纲并下载 —— 方便贴到别处继续用 */

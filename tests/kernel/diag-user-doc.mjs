@@ -22,6 +22,15 @@ const NOTEBOOK = process.env.MM_NOTEBOOK || "20221230192740-wpnntiv";
 const conf = JSON.parse(fs.readFileSync(`${WORKSPACE}/conf/conf.json`, "utf8"));
 const TOKEN = process.env.SIYUAN_TOKEN || conf.api?.token || "";
 
+/**
+ * 判定要能传出去：`ux:all` 用 `&&` 串起来，脚本 exit 0 链子就继续走。
+ * 原先下面两处 ✗（重叠/脱节、三种打开方式不一致）只 `console.log`，
+ * 红了也传不出去 —— 「有判定、没门」。
+ *
+ * ⚠️ 用 `process.exitCode` 而不是 `process.exit()`，别跳过 finally 里的清理与还原。
+ */
+let failed = false;
+
 const OUT = "tests/.build";
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -290,11 +299,13 @@ try {
     const bad = [A, B, C].filter((s) => s.overlapCount > 0 || s.orphan > 0);
     if (bad.length) {
         console.log(`\n✗ ${bad.length}/3 个状态存在重叠或连线脱节 —— 复现成功`);
+        failed = true;
     } else {
         console.log("\n✓ 三个状态都没有重叠、连线也都接上了");
     }
     if (new Set([key(A), key(B), key(C)]).size > 1) {
         console.log("✗ 三种打开方式的布局/视图不一致 —— 布局依赖渲染路径");
+        failed = true;
     } else {
         console.log("✓ 三种打开方式结果一致");
     }
@@ -323,4 +334,6 @@ try {
         await removeDoc(api, fixtureId);
         console.log("已清理对照文档");
     }
+    // 清理与还原都做完之后再设退出码（exitCode 不中断执行，放这里只是为了读起来清楚）
+    if (failed) process.exitCode = 1;
 }

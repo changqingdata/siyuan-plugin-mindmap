@@ -134,6 +134,8 @@ try {
         k(results.legacy.first) === k(results.native.first) &&
         k(results.legacy.second) === k(results.native.second);
     console.log(same ? "两种路径结果一致 ✓" : "两种路径结果不一致 ✗ —— 迁移会改变布局");
+    // ⚠️ 判定算出来了就得**传出去**（原先只打印，`ux:all` 的 && 链看不见它）。
+    if (!same) process.exitCode = 1;
 } finally {
     await chrome.close();
 }

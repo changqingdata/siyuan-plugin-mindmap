@@ -16,6 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { launch, sleep } from "./cdp.mjs";
+import { removeDoc } from "./kernel/_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -124,14 +125,11 @@ async function createDoc() {
     return { docId, listId: list.id };
 }
 
-async function removeDoc(docId) {
-    try {
-        const info = await api("/api/block/getBlockInfo", { id: docId });
-        await api("/api/filetree/removeDoc", { notebook: info.box, path: info.path });
-    } catch (err) {
-        console.warn("清理临时文档失败（请手动删除）：", err.message, docId);
-    }
-}
+/* 清理临时文档统一走 `_doc-cleanup.mjs` 的两步法（getPathByID → removeDoc）。
+   这里原先有一份本地实现，用 `getBlockInfo` 取 `info.box / info.path` ——
+   注意它取的是**顶层** `info.box`，而别的脚本取的是 `info.data.box`，
+   两种写法并存本身就说明这个字段路径不牢靠（不检查 code、出错还被 catch 吞成一句 warn）。
+   助手只此一份，改一处就够。 */
 
 /* ------------------------------------------------------------------ 页面探针注入 */
 
@@ -693,20 +691,47 @@ try {
             const zw = /[\\u200B-\\u200D\\u2060\\uFEFF]/g;
             const hit = Array.from(document.querySelectorAll('.mm-root:not(.mm-root--dialog) .mm-node'))
                 .find(n => ((n.querySelector('.mm-txt') || {}).textContent || '').replace(zw, '').trim() === ${JSON.stringify(text)});
-            return hit ? hit.dataset.nodeId : null;
+            // ⚠️ 是 dataset.mmId（属性 data-mm-id），不是 dataset.nodeId ——
+            //    导图节点**不能**带 data-node-id（会和真大纲块撞车，
+            //    见 src/core/renderer.ts 里那段长注释）。
+            //    原先读错了，返回 undefined，下一行的选择器就变成
+            //    [data-mm-id="undefined"]，报「找不到元素」。
+            //    （本段在 page.eval 的模板字符串里，注释里不能出现反引号。）
+            return hit ? hit.dataset.mmId : null;
         })()`);
         if (!id) return null;
-        await page.click(`.mm-root:not(.mm-root--dialog) .mm-node[data-node-id="${id}"]`);
+        await page.click(`.mm-root:not(.mm-root--dialog) .mm-node[data-mm-id="${id}"]`);
         return id;
     };
 
     // (a) 加子节点 → Ctrl+Z
+    //
+    // ⚠️⚠️ 这里**必须先 Esc 退出编辑态**，再按 Ctrl+Z。原因不是「顺手多按一下」：
+    //
+    //   `Tab` 是「插入子节点 **并进入编辑态**」（插入即改名）。
+    //   而编辑态下导图的键盘**整体让位给输入框** —— renderer 的 onKeyDown
+    //   首行就是 `if (this.editing) return;`，编辑态里所有按键都被
+    //   txt 自己的处理器 `stopPropagation()` 吃掉（它只认 Enter / Esc）。
+    //   于是 Ctrl+Z 既没被插件的历史栈接住、也没冒泡给思源，
+    //   只会去撤销 contenteditable 里正在输入的文字 —— 这**是设计如此**：
+    //   用户在改名字的时候按 Ctrl+Z，期待的当然是撤销刚敲的字，不是撤销整个块操作。
+    //
+    //   本段原先没有 Esc —— 写它的时候 Tab 还只插入、不进编辑态。
+    //   实测（tests/kernel/diag-undo-after-insert.mjs 三组对照）：
+    //     编辑态直接 Ctrl+Z → 内核不变、焦点留在 mm-txt       ← 就是那条红
+    //     先 Esc 再 Ctrl+Z  → 焦点回到 mm-root、撤销成功
+    //   所以这里补一次 Esc，把动作序列对齐到用户真实会做的那一套。
+    //
+    //   用 Esc 而不是 Enter：Esc 是「放弃改名」，不会多写一条 rename 记录，
+    //   Ctrl+Z 撤掉的正好是插入那一步 —— 这正是本条要测的东西。
     const undoAdd0 = await itemShape(doc.listId);
     await clickNodeText("环境选择");
     await sleep(300);
     await page.press("Tab");
     await sleep(1500);
     const undoAdd1 = await itemShape(doc.listId);
+    await page.press("Escape"); // 退出编辑态并把焦点还给导图（见上方长注释）
+    await sleep(600);
     await page.press("z", { ctrl: true });
     await sleep(1500);
     const undoAdd2 = await itemShape(doc.listId);
@@ -717,7 +742,12 @@ try {
         `内核 ${JSON.stringify(undoAdd2)} vs 操作前 ${JSON.stringify(undoAdd0)}`,
     );
 
-    // 撤销之后焦点必须还在导图上，否则第二次 Ctrl+Z 根本没人接
+    // 撤销之后焦点必须还在导图上，否则第二次 Ctrl+Z 根本没人接。
+    //
+    // 判据是 `/mm-root/` 而不是「焦点在导图内」：`.mm-txt`（编辑态）也在导图内，
+    // 但那时 Ctrl+Z 归 contenteditable，没人接 —— 只有落在 `.mm-root` 上才算数。
+    // 这条曾经红过：退出编辑态后焦点掉到布局容器（`fn__flex-column`），
+    // 修法是 finish() 在键盘主动退出（Enter / Esc）时 restoreFocus()。
     const focusAfterUndo = await page.eval(`(() => {
         const a = document.activeElement;
         return a ? (a.className || a.tagName) : 'none';
@@ -847,7 +877,10 @@ try {
     }
 } finally {
     await chrome.close();
-    if (docId && !process.env.MM_KEEP) await removeDoc(docId);
+    if (docId && !process.env.MM_KEEP) {
+        const ok = await removeDoc(api, docId);
+        console.log(ok ? "已清理临时文档" : "⚠️ 临时文档未能清理: " + docId);
+    }
     else if (docId) console.log("\n保留临时文档（MM_KEEP=1）:", docId);
 }
 

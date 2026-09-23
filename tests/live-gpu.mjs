@@ -16,6 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { launch, sleep } from "./cdp.mjs";
+import { removeDoc } from "./kernel/_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -178,11 +179,10 @@ try {
 
 } finally {
     await chrome.close();
-    try {
-        const info = await api("/api/block/getBlockInfo", { id: docId });
-        await api("/api/filetree/removeDoc", { notebook: info.box, path: info.path });
-        console.log("已清理临时文档");
-    } catch (err) {
-        console.warn("清理失败:", err.message, docId);
-    }
+    /* 统一走 _doc-cleanup 的两步法（getPathByID → removeDoc）。
+       原先用 getBlockInfo 取 box/path —— 字段名碰巧对得上，但这是两条不同的路径，
+       而且外层那个 try/catch 会把失败降级成一句 warn（能看见，但不会传退出码）。
+       清理助手内部会打印真实原因，改一处就够。 */
+    const ok = await removeDoc(api, docId);
+    console.log(ok ? "已清理临时文档" : "⚠️ 临时文档未能清理: " + docId);
 }

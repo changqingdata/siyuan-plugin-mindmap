@@ -260,6 +260,11 @@ try {
 
     const pass = results.filter((r) => r.ok).length;
     console.log(`\n${pass}/${results.length} 项通过`);
+    // ⚠️ 必须把失败**传出去**。`ux:all` 是用 `&&` 串起来的，脚本只要 exit 0，
+    //    链子就继续往下走 —— 这 13 条断言红了也没人知道（本支原先就是这个问题）。
+    // ⚠️ 用 `process.exitCode` 而不是 `process.exit()`：后者会**跳过 finally**，
+    //    `chrome.close()` 与 `removeDoc()` 都不执行，临时文档就留在用户工作空间里了。
+    if (pass !== results.length) process.exitCode = 1;
 } finally {
     await chrome.close();
     await removeDoc(api, docId);

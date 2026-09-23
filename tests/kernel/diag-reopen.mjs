@@ -22,6 +22,18 @@ const NOTEBOOK = process.env.MM_NOTEBOOK || "20221230192740-wpnntiv";
 const conf = JSON.parse(fs.readFileSync(`${WORKSPACE}/conf/conf.json`, "utf8"));
 const TOKEN = process.env.SIYUAN_TOKEN || conf.api?.token || "";
 
+/**
+ * 本支的判定**要能传出去**。
+ *
+ * `ux:all` 是用 `&&` 串起来的 —— 脚本只要 exit 0，链子就继续往下走。
+ * 原先这里的三处 ✗ 只 `console.log`，于是「布局依赖渲染次序」「单击就退出编辑态」
+ * 这些**真机反馈复现出来的**判定，红了也没人知道。
+ *
+ * ⚠️ 用 `process.exitCode` 而不是 `process.exit()`：后者会跳过 finally 里的
+ *    `chrome.close()` 与 `removeDoc()`，临时文档就留在用户工作空间里了。
+ */
+let failed = false;
+
 async function api(p, payload) {
     const res = await fetch(KERNEL + p, {
         method: "POST",
@@ -77,7 +89,11 @@ const PROBE = `(() => {
     const nodes = els.map((e) => {
         const r = e.getBoundingClientRect();
         return {
-            id: e.dataset.nodeId || '',
+            // ⚠️ 导图节点用 data-mm-id（dataset.mmId），不是 data-node-id ——
+            //    见 src/core/renderer.ts 的长注释。原先读错，这里恒为空串，
+            //    虽然当前断言只按 txt 对齐、没被暴露，但留着就是个哑弹。
+            //    （本段在 page.eval 的模板字符串里，注释里不能出现反引号。）
+            id: e.dataset.mmId || '',
             txt: ((e.querySelector('.mm-txt') || {}).textContent || '').replace(/[\\u200B-\\u200D\\u2060\\uFEFF]/g, '').trim().slice(0, 14),
             l: Math.round(r.left - vr.left), t: Math.round(r.top - vr.top),
             w: Math.round(r.width), h: Math.round(r.height),
@@ -202,6 +218,7 @@ try {
     const same = fp(sA) === fp(sB);
     console.log(`\n布局确定性（同一份数据、同一折叠态）: ${same ? "✓ 坐标一致" : "✗ 坐标不一致 —— 布局依赖渲染次序"}`);
     if (!same) {
+        failed = true;
         const m1 = new Map(sA.nodes.map((n) => [n.txt, n]));
         let diff = 0;
         for (const b of sB.nodes) {
@@ -232,6 +249,7 @@ try {
     })()`);
     if (!pick) {
         console.log("  ✗ 找不到可编辑的节点");
+        failed = true;
     } else {
         const state = () => page.eval(`(() => {
             const root = document.querySelector('.mm-root:not(.mm-root--dialog):not(.mm-root--side)');
@@ -262,6 +280,7 @@ try {
         const b = await state();
         console.log(`  再单击一次: editing=${b.editing} editable=${b.editable} active=${b.active}`);
         console.log(b.editing ? "  ✓ 单击不退出编辑态" : "  ✗ 单击就退出编辑态 —— 复现成功（用户反馈 2）");
+        if (!b.editing) failed = true;
 
         // 再点一次，确认能连续编辑
         if (b.editing) {
@@ -270,6 +289,7 @@ try {
             await sleep(300);
             const c = await state();
             console.log(`  连点两次: editing=${c.editing} ${c.editing ? "✓" : "✗ 被踢出"}`);
+            if (!c.editing) failed = true;
         }
         await page.screenshot(`${OUT}/re-04-edit.png`);
     }
@@ -277,4 +297,7 @@ try {
     await chrome.close();
     await removeDoc(api, docId);
     console.log("\n已清理临时文档");
+    // 清理**之后**再设退出码：先设的话也拦不住（exitCode 只影响进程退出码，不中断执行），
+    // 但放在这里读起来能一眼看出「清理一定会跑」。
+    if (failed) process.exitCode = 1;
 }

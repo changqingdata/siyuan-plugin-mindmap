@@ -15,7 +15,12 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { launch, sleep } from "./cdp.mjs";
+// ⚠️ 路径是 `../cdp.mjs`（`cdp.mjs` 在 `tests/` 下，不在 `tests/kernel/`）。
+//    这里原先写的是 `./cdp.mjs` —— 全仓唯一一处，而且因为本脚本从来没被跑过
+//    （`kernel:focus` 不在 `ux:all` 也不在 `check:all` 里），一直没人发现：
+//    一跑就是 `ERR_MODULE_NOT_FOUND`，连第一行都执行不到。
+import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -148,10 +153,15 @@ try {
         const zw = /[\\u200B-\\u200D\\u2060\\uFEFF]/g;
         const hit = Array.from(document.querySelectorAll('.mm-root:not(.mm-root--dialog) .mm-node'))
             .find(n => ((n.querySelector('.mm-txt') || {}).textContent || '').replace(zw, '').trim() === '123');
-        return hit ? hit.dataset.nodeId : null;
+        // ⚠️ 是 dataset.mmId（属性 data-mm-id），不是 dataset.nodeId ——
+        //    见 src/core/renderer.ts 里那段「绝对不能用 data-node-id」的长注释。
+        //    原先读错了，返回 undefined，下一行的选择器就变成
+        //    [data-mm-id="undefined"]，报「找不到元素」。
+        //    （本段在 page.eval 的模板字符串里，注释里不能出现反引号。）
+        return hit ? hit.dataset.mmId : null;
     })()`);
     console.log("目标节点:", id);
-    await page.click(`.mm-root:not(.mm-root--dialog) .mm-node[data-node-id="${id}"]`);
+    await page.click(`.mm-root:not(.mm-root--dialog) .mm-node[data-mm-id="${id}"]`);
     await sleep(300);
     console.log("点完之后 activeElement:", await page.eval(`(() => { const a = document.activeElement; return a ? (a.className || a.tagName) : 'none' })()`));
 
@@ -176,14 +186,17 @@ try {
     console.log("\n笔记:", raw.notes.join(", "));
 
     console.log("\n删除后内核:", JSON.stringify(await itemShape(list.id)));
-
-    if (!process.env.MM_KEEP) {
-        const info = await api("/api/block/getBlockInfo", { id: docId });
-        await api("/api/filetree/removeDoc", { notebook: info.box, path: info.path });
-        console.log("已清理临时文档");
-    } else {
-        console.log("MM_KEEP=1，保留文档:", docId);
-    }
 } finally {
     await chrome.close();
+    /* ⚠️ 清理**必须在 finally 里**，不能在 try 末尾 —— 本支就崩过两次
+       （import 路径写错、在 .mm-node 上读 dataset.nodeId），一崩就跳过清理，
+       在用户笔记本里留下「临时-焦点探针-时间戳」。实测本轮正是它漏了 1 个。
+       删文档要用 _doc-cleanup 的两步法（getPathByID → removeDoc），
+       直接传 {id} 会报「Field [notebook] is required」而被静默吞掉。 */
+    if (docId && !process.env.MM_KEEP) {
+        const ok = await removeDoc(api, docId);
+        console.log(ok ? "已清理临时文档" : "⚠️ 临时文档未能清理: " + docId);
+    } else if (docId) {
+        console.log("MM_KEEP=1，保留文档:", docId);
+    }
 }

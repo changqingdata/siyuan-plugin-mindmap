@@ -136,12 +136,17 @@ try {
 
     const colsSet = [...new Set(seen.map((s) => s.cols.length))];
     const worldSet = [...new Set(seen.map((s) => s.world))];
+    const colsStable = colsSet.length === 1;
     console.log(
-        colsSet.length > 1
-            ? `\n✗ 列数在 ${JSON.stringify(colsSet)} 之间来回跳 —— 布局↔视口 反馈回路实锤（用户反馈 1）`
-            : `\n✓ 列数稳定在 ${colsSet[0]}`,
+        colsStable
+            ? `\n✓ 列数稳定在 ${colsSet[0]}`
+            : `\n✗ 列数在 ${JSON.stringify(colsSet)} 之间来回跳 —— 布局↔视口 反馈回路实锤（用户反馈 1）`,
     );
     console.log(worldSet.length > 1 ? `  画布尺寸也在变: ${JSON.stringify(worldSet)}` : `  画布尺寸稳定: ${worldSet[0]}`);
+    // ⚠️ 判定算出来了就得**传出去**。原先只 console.log，于是 `ux:all` 的 && 链
+    //    看不到这条 ✗，脚本照样 exit 0 —— 「有判定、没门」。
+    //    用 exitCode 而不是 process.exit()，别跳过 finally 里的清理。
+    if (!colsStable) process.exitCode = 1;
 } finally {
     await chrome.close();
     await removeDoc(api, docId);

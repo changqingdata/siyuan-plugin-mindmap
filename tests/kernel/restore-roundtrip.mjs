@@ -20,6 +20,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -112,8 +113,14 @@ async function drop(doc) {
         console.log("  MM_KEEP=1 保留:", doc);
         return;
     }
-    const info = (await api("/api/block/getBlockInfo", { id: doc })).data;
-    await api("/api/filetree/removeDoc", { notebook: info.box, path: info.path });
+    /* ⚠️ 本支是探针（顶层 await，没有 try/finally 包住主逻辑），
+       `drop()` 又写在循环体末尾 —— 中途抛异常就会跳过清理，留下「临时-还原探针-时间戳」。
+       这里没做结构改造（探针跑得少、收益低于改动风险），但两点必须做到：
+         1. 清理走 _doc-cleanup 的两步法（getPathByID → removeDoc），
+            原来用 getBlockInfo 取 box/path 是另一条路径，字段名不保证一致；
+         2. 失败要**出声**，不能静默吞掉。
+       万一真漏了，用 `npm run clean:tmp` 扫掉（它按「临时-」+ 签名匹配）。 */
+    if (!(await removeDoc(api, doc))) console.warn("  ⚠️ 清理失败:", doc);
 }
 
 /** 剥掉所有块属性注释行（最后一行是列表块自己的 IAL，留着） */
@@ -156,7 +163,21 @@ for (const variant of ["raw", "noIal", "rawTwice"]) {
     console.log(`  删除后 ${dropped.length} 项`);
     console.log(`  还原后 ${after.length} 项：${after.join(" | ")}`);
     console.log(`  坏项可见      ：${raw.join(" | ")}`);
-    console.log(`  ${good ? "✔ 完全还原" : "✘ 没还原干净"}`);
+    /*
+     * ⚠️⚠️ 这里的 ✘ 是**预期结果，不是失败** —— 本支是探针，故意不设退出码。
+     *
+     * 本脚本要证明的命题就是「喂一次还原不干净、喂两次才行」：
+     *   raw      → ✘（最后一项的段落子块脱开，落成「有内容、没段落」的坏列表项）
+     *   noIal    → ✘（一样坏，所以不是「已删块 ID」的锅）
+     *   rawTwice → ✔
+     * 所以前两个变体**本来就该 ✘**，正是它让 src/utils/api.ts 的 restoreBlock 写两次。
+     *
+     * 判据（与 diag-zoom-measure 同一条）：
+     *   这段代码红了，说明「产品坏了」还是「我搞错了」？前者才配当门。
+     *   这里是「红」本身就是要记录的结论 —— 加门就会造出一扇永远红的门，
+     *   而永远红的门比没有门更糟（会被所有人无视）。
+     */
+    console.log(`  ${good ? "✔ 完全还原" : "✘ 没还原干净（见脚本头部注释：raw / noIal 变体本就如此，属预期）"}`);
 
     await drop(doc);
 }

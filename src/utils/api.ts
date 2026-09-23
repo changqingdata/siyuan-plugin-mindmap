@@ -1,4 +1,5 @@
 import { fetchSyncPost } from "siyuan";
+import type { MMSearchHit } from "../types";
 
 /** 读取单个块的属性 */
 export async function getBlockAttrs(id: string): Promise<Record<string, string>> {
@@ -253,15 +254,190 @@ export async function moveBlock(opts: MoveBlockOptions): Promise<boolean> {
     }
 }
 
+/* ==================================================================== 待办勾选 */
+
+/**
+ * 切换一个任务列表项的勾选态。
+ *
+ * ⚠️ **必须走这个专用接口**，两条看起来更直觉的路都是错的，实测记录：
+ *
+ * 1. `/api/block/updateBlock` + `dataType: "markdown"` 往**列表项**写 `- [x] 文字`
+ *    —— 勾选态确实变了，但该列表项的**子列表被整段冲掉**。
+ *    实测「有子项的任务」勾一下，它下面的「它的子条目」直接消失。
+ * 2. `setBlockAttrs` 写 `data-task` —— 内核直接拒绝：
+ *
+ *        setting or removing [data-task] attribute is not allowed via this interface.
+ *        Please use "/api/block/updateTaskListItemMarker" ...
+ *
+ *    这条报错反倒把正确接口报了出来。
+ *
+ * `marker` 用 `" "` 表示未勾选，其它字符表示已勾选（实测传 `"x"` 会落成 kramdown 里的 `[X]`）。
+ * 子列表不受影响，块 ID 也不变 —— 引用与反链都安全。
+ */
+export async function setTaskMarker(id: string, checked: boolean): Promise<boolean> {
+    try {
+        const res = await fetchSyncPost("/api/block/updateTaskListItemMarker", {
+            id,
+            marker: checked ? "x" : " ",
+        });
+        return res?.code === 0;
+    } catch (err) {
+        console.warn("[mindmap] 写入待办勾选态失败", id, checked, err);
+        return false;
+    }
+}
+
+/**
+ * 批量勾选 / 取消勾选。
+ *
+ * 内核有专门的批量接口（`items: [{ id, marker }]`），一次往返搞定，
+ * 不必像折叠那样逐条打 —— 这也是「批量操作整体成功或整体回滚」最好实现的形态：
+ * 内核自己就是一次事务，不存在「改了一半」的中间态。
+ *
+ * **形状只有 `items` 一种**（`tests/kernel/probe-batch-marker-shape.mjs` 实测）：
+ *   ✔ `{ items: [{ id, marker }, …] }`
+ *   ✘ `{ ids: [...], marker }`   → `code:-1 Field [items] is required`
+ *   ✘ `{ id, marker }`           → 同上（这里没有单条简写）
+ *   ✘ `{ items: ["id1", …] }`    → `cannot unmarshal string into … map[string]json.RawMessage`
+ * 传错形状**不会抛异常**，只是静默不生效 —— 所以别改这个形状。
+ */
+export async function setTaskMarkers(ids: string[], checked: boolean): Promise<boolean> {
+    if (ids.length === 0) return true;
+    try {
+        const res = await fetchSyncPost("/api/block/batchUpdateTaskListItemMarker", {
+            items: ids.map((id) => ({ id, marker: checked ? "x" : " " })),
+        });
+        return res?.code === 0;
+    } catch (err) {
+        console.warn("[mindmap] 批量写入待办勾选态失败", ids.length, checked, err);
+        return false;
+    }
+}
+
 /* ==================================================================== 文档 */
 
+/**
+ * 跨图搜索：在这篇文档的**所有导图列表**里找节点。
+ *
+ * 为什么走 SQL 而不是逐张图 `getBlockKramdown` + 解析：
+ * 文档里可能有十几张导图、上百个节点，逐张拉 kramdown 就是十几个往返，
+ * 而且还得在插件里再写一遍 kramdown 解析（`parseList` 要 DOM，那些列表块
+ * 并不在页面上，用不了）。一次 SQL 把 `l` / `i` 两种块连同 `parent_id` 一起拿回来，
+ * 在内存里拼出父子关系即可 —— 一个往返，零解析。
+ *
+ * 只认 `custom-mindmap` 属性标记过的列表（值是什么无所谓，logic / mind / tree 都算），
+ * 所以「文档里没被转成导图的列表」不会混进结果里 —— 用户在这个框里搜的
+ * 是「我的导图」，不是「我的文档」。
+ *
+ * ★ 取文字用的是 **`fcontent`，不是 `content` / `markdown`**。
+ *   `tests/kernel/probe-sql-item-content.mjs` 实测：对列表项（type='i'），
+ *   `content` 与 `markdown` 都把**整棵子树**拼在一起 ——
+ *   一个内容只有「第二章」的父项，`content` 是 `" 第二章 跨图目标节点"`。
+ *   拿它匹配关键词的话，搜任何子节点都会把沿途所有祖先一起搜出来，
+ *   结果列表里全是「父节点」这种假命中。`fcontent` 才是该项自己的文字。
+ *
+ * @param listId 当前列表块 ID —— 文档靠它反查（`root_id`），调用方不用自己去查文档
+ * @param q      关键词（大小写不敏感）
+ */
+export async function searchDocOutline(listId: string, q: string): Promise<MMSearchHit[]> {
+    const needle = q.trim().toLowerCase();
+    if (!listId || !needle) return [];
+
+    let rows: Array<Record<string, string>> = [];
+    try {
+        // 一次拿全：列表块（判是不是导图）+ 列表项块（判内容 + 拼路径）。
+        // 文档靠子查询反查 `root_id`，省掉一次往返。
+        // 文档规模上限就是几千个块，`limit` 给足；再大的文档也不该拿来做导图。
+        const res = await fetchSyncPost("/api/query/sql", {
+            stmt:
+                `select id, parent_id, type, fcontent, ial from blocks ` +
+                `where root_id = (select root_id from blocks where id = '${listId.replace(/'/g, "''")}') ` +
+                `and type in ('l', 'i') limit 5000`,
+        });
+        rows = (res?.data ?? []) as Array<Record<string, string>>;
+    } catch (err) {
+        console.warn("[mindmap] 跨图搜索失败", err);
+        return [];
+    }
+
+    const listOf = new Map<string, string>();
+    const itemOf = new Map<string, { parent: string; text: string }>();
+    const isMapList = new Set<string>();
+    for (const r of rows) {
+        if (r.type === "l") {
+            listOf.set(r.id, r.parent_id ?? "");
+            if ((r.ial ?? "").includes("custom-mindmap")) isMapList.add(r.id);
+        } else if (r.type === "i") {
+            itemOf.set(r.id, { parent: r.parent_id ?? "", text: (r.fcontent ?? "").trim() });
+        }
+    }
+
+    const out: MMSearchHit[] = [];
+    for (const [id, item] of itemOf) {
+        if (!item.text.toLowerCase().includes(needle)) continue;
+
+        // 从列表项往上走，一边攒路径一边找「归属的那张导图」。
+        // 走到顶层（parent 不在 blocks 里，即文档块）还没碰到导图列表，就说明
+        // 这个节点属于一个没被转成导图的列表 —— 直接丢弃。
+        const chain = [item.text];
+        let cur = item.parent;
+        let owner = "";
+        for (let guard = 0; guard < 64 && cur; guard++) {
+            const list = listOf.get(cur);
+            if (list === undefined) break; // 不是列表块，说明已经走出去了
+            if (isMapList.has(cur)) {
+                owner = cur;
+                break;
+            }
+            // 走到上一层的列表项，继续往上
+            const up = itemOf.get(list);
+            if (!up) break;
+            chain.unshift(up.text);
+            cur = up.parent;
+        }
+        if (!owner) continue;
+
+        out.push({ id, text: item.text, listId: owner, path: chain.join(" › ") });
+    }
+
+    // 命中多的场合，短的（更靠近根）排前面 —— 用户多半在找「那一大类」
+    out.sort((a, b) => a.path.length - b.path.length);
+    return out.slice(0, 50);
+}
+
+/**
+ * 内核版本（诊断信息用）。
+ *
+ * 缓存住：诊断面板可能被反复点，版本号在一次会话里不会变。
+ * 拿不到就返回空串 —— 诊断信息缺一行，总比整个「复制诊断」按钮报错强。
+ */
+let cachedVersion = "";
+export async function getKernelVersion(): Promise<string> {
+    if (cachedVersion) return cachedVersion;
+    try {
+        const res = await fetchSyncPost("/api/system/version", {});
+        cachedVersion = String(res?.data ?? "");
+    } catch (err) {
+        console.warn("[mindmap] 读取内核版本失败", err);
+    }
+    return cachedVersion;
+}
+
 /** 取编辑器文档标题 */
-export function getDocTitle(scope: HTMLElement | null): string {
+// i18n-audit-ignore-start
+/**
+ * 取编辑器文档标题。
+ *
+ * `fallback` 由调用方传入 i18n 化后的值（默认值是「没有标题时兜底」，
+ * 只有调用方忘了传才会用上，所以留中文即可）。
+ */
+export function getDocTitle(scope: HTMLElement | null, fallback = "导图"): string {
     const protyle = scope?.closest(".protyle") ?? document.querySelector(".protyle");
     const title = protyle?.querySelector<HTMLElement>(".protyle-title");
     const text = title?.textContent?.trim();
-    return text || "导图";
+    return text || fallback;
 }
+// i18n-audit-ignore-end
 
 /** 把文本写入剪贴板，带 execCommand 兜底（非安全上下文下 navigator.clipboard 不可用） */
 export async function copyText(text: string): Promise<boolean> {

@@ -8,11 +8,14 @@ import type {
     MMConfig,
     MMLayout,
     MMNode,
+    MMNodeMark,
     MMTheme,
     MMViewPrefs,
 } from "../types";
 import { MindMapView } from "./renderer";
 import { History } from "./history";
+import type { HistoryEntry } from "./history";
+import { ATTR_MARK, encodeMark } from "./marks";
 import { decodeViewPrefs, encodeViewPrefs } from "./prefs";
 import {
     getBlockAttrs,
@@ -20,6 +23,7 @@ import {
     getDocTitle,
     restoreBlock,
     scrollToBlock,
+    searchDocOutline,
     setBlockAttrs,
     setOutlineFold,
 } from "../utils/api";
@@ -38,11 +42,19 @@ import {
     outdentNodes,
     pasteNode,
     renameNode,
+    setTaskChecks,
+    toggleTaskCheck,
 } from "./actions";
 import { topLevelOf } from "./tree";
 
 export interface ScannerHooks {
     getOptions: () => MMConfig;
+    /**
+     * i18n 词表（可选）。扫描器把它**透传给每个 `MindMapView`** ——
+     * 视图层需要它来渲染布局名、导出菜单等用户可见文案。
+     * 缺失时视图回退到内置中文，行为与以前完全一致。
+     */
+    i18n?: Record<string, string>;
     /** 布局切换后写回块属性 */
     onLayoutChange: (listId: string, layout: MMLayout) => void;
     /** 打开全屏查看 */
@@ -81,8 +93,19 @@ const ACTION_LABEL: Record<string, string> = {
     move: "移动节点",
     duplicate: "复制节点",
     paste: "粘贴节点",
+    check: "勾选",
+    uncheck: "取消勾选",
 };
 
+/**
+ * 撤销记录里的操作名。
+ *
+ * 勾选是**双向**的 —— 同一个 `toggleCheck` 既可能是「勾选」也可能是「取消勾选」，
+ * 静态表只能写死一个名字，撤销面板里就会显示反了。
+ *
+ * 名字按**目标态**取，不看 `node.checked`：渲染层在派发动作之前就已经把它乐观翻过了，
+ * 那时读到的是操作**之后**的状态，正好会把「勾选」显示成「取消勾选」。
+ */
 /**
  * 失败原因（人话，直接显示在节点上）。
  *
@@ -101,6 +124,7 @@ const ACTION_FAIL: Record<string, string> = {
     move: "移动失败：目标位置无法放置",
     duplicate: "复制失败，请重试",
     paste: "粘贴失败，请重试",
+    toggleCheck: "勾选失败，请重试",
 };
 
 /** 观察选项：内容变化 + 我们关心的那个属性变化 */
@@ -141,6 +165,32 @@ const FOLD_MAX_TRIES = 3;
  */
 export class Scanner {
     private views = new Map<string, MindMapView>();
+
+    /**
+     * i18n 取值入口。取不到就回退到内置中文 —— 缺词表时行为与以前**完全一致**。
+     * 与 `renderer.ts` / `index.ts` 里的同名方法同源：取值只留一个入口。
+     */
+    private t(key: string, fallback: string, vars?: Record<string, string | number>): string {
+        const v = this.hooks.i18n?.[key];
+        let s = typeof v === "string" && v ? v : fallback;
+        // 占位符模板（`{n}` / `{act}`）。带变量的提示语必须走模板，拼接式在英文下会混搭。
+        if (vars) for (const [k, val] of Object.entries(vars)) s = s.split(`{${k}}`).join(String(val));
+        return s;
+    }
+
+    /**
+     * 操作名（历史记录标签与失败提示里用）。
+     *
+     * 名字按**目标态**取，不看 `node.checked`：渲染层在派发动作之前就已经把它乐观翻过了，
+     * 那时读到的是操作**之后**的状态，正好会把「勾选」显示成「取消勾选」。
+     */
+    private actionLabel(kind: string, extra?: MMActionExtra): string {
+        if (kind === "toggleCheck") {
+            return extra?.checked ? this.t("act.check", "勾选") : this.t("act.uncheck", "取消勾选");
+        }
+        return this.t(`act.${kind}`, ACTION_LABEL[kind] ?? "操作");
+    }
+
     /**
      * 折叠覆盖表：`listId → (blockId → 期望的折叠态)`。
      *
@@ -302,6 +352,27 @@ export class Scanner {
 
     get sideListId(): string {
         return this.side?.listId ?? "";
+    }
+
+    /**
+     * 所有已挂载视图的状态摘要（P1-5 诊断面板用）。
+     *
+     * 把行内 / 全屏 / 并排三种视图**都**列出来，不去猜「用户现在看的是哪一个」——
+     * 排障时最常见的困惑恰恰是「我改了设置怎么没反应」，
+     * 而真相往往是「另一个视图（并排面板 / 全屏）还挂在旧配置上」。
+     * 一次列全，一眼就能看出来。
+     */
+    viewSummaries(): Array<{ where: string; info: ReturnType<MindMapView["diagLine"]> }> {
+        const out: Array<{ where: string; info: ReturnType<MindMapView["diagLine"]> }> = [];
+        for (const [id, v] of this.views) out.push({ where: this.t("ui.whereInline", "行内 {id}", { id }), info: v.diagLine() });
+        if (this.fullscreen) out.push({ where: this.t("ui.whereFullscreen", "全屏 {id}", { id: this.fullscreen.listId }), info: this.fullscreen.view.diagLine() });
+        if (this.side) out.push({ where: this.t("ui.whereSide", "并排 {id}", { id: this.side.listId }), info: this.side.view.diagLine() });
+        return out;
+    }
+
+    /** 撤销栈里还剩几条 —— 诊断面板用（「Ctrl+Z 没反应」多半是栈空了） */
+    get historyDepth(): number {
+        return this.history.depth;
     }
 
     /**
@@ -529,7 +600,7 @@ export class Scanner {
             // 否则用户会先看到一张默认样式的图、再「跳」成他自己调好的样子。
             const prefs = await this.loadPrefs(id);
 
-            const title = getDocTitle(list);
+            const title = getDocTitle(list, this.t("ui.mindMap", "导图"));
             const view = new MindMapView(
                 list,
                 opts,
@@ -547,6 +618,10 @@ export class Scanner {
                     onBatchAction: (kind, nodes) => this.applyBatch(kind, nodes, id),
                     onViewPrefs: (next) => this.savePrefs(id, next),
                     onHistory: (redo) => this.undo(redo),
+                    onSearchDoc: (q) => searchDocOutline(id, q),
+                    onMarkChange: (node, mark) => void this.applyMark(node, mark, id),
+                    // 词表透传给视图（缺省时视图回退到内置中文）
+                    i18n: this.hooks.i18n,
                 },
                 title,
                 "inline",
@@ -576,12 +651,12 @@ export class Scanner {
         box.setAttribute("contenteditable", "false");
 
         const text = document.createElement("span");
-        text.textContent = `该列表含 ${count} 个节点，超过渲染上限 ${limit}，已暂停渲染以免拖慢编辑器。`;
+        text.textContent = this.t("msg.tooManyNodes", "该列表含 {count} 个节点，超过渲染上限 {limit}，已暂停渲染以免拖慢编辑器。", { count, limit });
 
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "b3-button b3-button--outline fn__size200";
-        btn.textContent = "仍然渲染";
+        btn.textContent = this.t("ui.renderAnyway", "仍然渲染");
         btn.onclick = (e) => {
             e.stopPropagation();
             this.forced.add(id);
@@ -621,9 +696,15 @@ export class Scanner {
         return listId ? getBlockKramdown(listId) : Promise.resolve(null);
     }
 
-    private record(listId: string, label: string, before: string | null, after: string | null) {
+    private record(
+        listId: string,
+        label: string,
+        before: string | null,
+        after: string | null,
+        attrs?: HistoryEntry["attrs"],
+    ) {
         if (!listId || before === null || after === null) return;
-        this.history.push({ listId, label, before, after });
+        this.history.push({ listId, label, before, after, attrs });
     }
 
     /** 改名回写（全屏视图也会调用） */
@@ -635,12 +716,78 @@ export class Scanner {
         const before = await this.snapshot(listId);
         const ok = await renameNode(node, text);
         if (!ok) {
-            showMessage("改名失败", 4000, "error");
+            showMessage(this.t("msg.renameFailed", "改名失败"), 4000, "error");
             return;
         }
-        this.record(listId, "改名", before, await this.snapshot(listId));
+        this.record(listId, this.t("msg.rename", "改名"), before, await this.snapshot(listId));
         this.rescanSoon();
         this.focusSoon(listId);
+    }
+
+    /**
+     * 节点标记回写（P1-2）。
+     *
+     * 存**块属性** `custom-mindmap-mark`，`null` 表示删掉这个属性
+     * （而不是写空串 —— 空串会在属性面板里留一个空的 `custom-mindmap-mark`，
+     * 看着像插件留下了垃圾）。
+     *
+     * 也进撤销栈：标记是**内容**，不是视图状态。撤销面板里显示「设置标记 / 清除标记」，
+     * 撤销时靠 `restoreBlock` 把整个列表的 kramdown 写回去 ——
+     * 块属性本来就在 kramdown 的 `{: ... }` 里，所以这条路不用特殊处理。
+     */
+    async applyMark(node: MMNode, mark: MMNodeMark | null, listId = "") {
+        if (!node.id) return;
+        this.lastUserActionAt = Date.now();
+
+        const beforeAttr = (await getBlockAttrs(node.id))[ATTR_MARK] || null;
+        const before = await this.snapshot(listId);
+        const after = encodeMark(mark);
+        await setBlockAttrs(node.id, { [ATTR_MARK]: after });
+        // 属性改动**不在 kramdown 快照的还原范围内**（见 HistoryEntry.attrs 的注释），
+        // 所以单独带一份值，撤销 / 重做时补写
+        this.record(listId, mark ? this.t("menu.setMark", "设置标记") : this.t("menu.clearMark", "清除标记"), before, await this.snapshot(listId), {
+            id: node.id,
+            before: beforeAttr,
+            after,
+        });
+        // 块属性的变化**不会**触发文档事务，也就不会有 DOM 回推 ——
+        // 插件得自己把属性同步到 DOM 上，否则「重渲染时从 DOM 读属性」这条链就断了。
+        // （`custom-mindmap` 那个属性也是这么手动同步的，见 setListLayout。）
+        this.syncMarkToDom(node.id, after);
+        this.rescanSoon();
+    }
+
+    /** 把标记属性同步到那个块的大纲 DOM 上（属性改动不会触发事务，不会有 DOM 回推） */
+    private syncMarkToDom(nodeId: string, encoded: string | null) {
+        const el = this.findListItemEl(nodeId);
+        if (!el) return;
+        if (encoded) el.setAttribute(ATTR_MARK, encoded);
+        else el.removeAttribute(ATTR_MARK);
+    }
+
+    /**
+     * 丢掉所有在途的乐观标记。
+     *
+     * 撤销 / 重做会把内容整体写回去，那些「等 DOM 追上来」的覆盖值全部作废 ——
+     * 而且它们**永远等不到对齐**（撤销是反方向的改动），只能靠超时退休。
+     * 不清的话，撤销之后最多 3 秒内画面上还挂着那个已经被撤掉的标记。
+     */
+    private clearMarkOverlays() {
+        for (const v of this.views.values()) v.forgetMarkOverlay();
+        this.side?.view.forgetMarkOverlay();
+        this.fullscreen?.view.forgetMarkOverlay();
+    }
+
+    /**
+     * 找到某个块在**大纲里**的那一个 `.li` 元素。
+     *
+     * 限定在 `.protyle-wysiwyg` 里查：文档可能没开着（那就返回 null，
+     * 等下次打开时内核会把属性渲染出来），也可能同时开着好几个页签。
+     * 用 `data-node-id` 是安全的 —— 导图节点用的是 `data-mm-id`，
+     * 当初就是踩过「导图节点也叫 data-node-id」的坑才改的名（见 renderer.createNodeEl）。
+     */
+    private findListItemEl(nodeId: string): HTMLElement | null {
+        return document.querySelector<HTMLElement>(`.protyle-wysiwyg .li[data-node-id="${nodeId}"]`);
     }
 
     /* ================================================================ 视图偏好 */
@@ -747,16 +894,20 @@ export class Scanner {
             case "paste":
                 if (extra?.data) ok = await pasteNode(node, extra.data);
                 break;
+            case "toggleCheck":
+                // 目标态由渲染层给（它在派发前已经乐观翻过了），这里**不能**再取反
+                ok = await toggleTaskCheck(node, extra?.checked ?? !node.checked);
+                break;
             default:
-                return { ok: false, message: "不支持的操作" };
+                return { ok: false, message: this.t("msg.unsupportedAction", "不支持的操作") };
         }
 
         if (!ok) {
             // 失败反馈交给视图去做（在原节点上打红边 + 抖动），这里只把原因带回去。
             // 视图手里有节点元素，能指出「是哪一个」；这里只有一个 ID。
-            return { ok: false, message: ACTION_FAIL[kind] ?? "操作未生效，请重试" };
+            return { ok: false, message: this.t(`actionFail.${kind}`, ACTION_FAIL[kind] ?? "操作未生效，请重试") };
         }
-        this.record(listId, ACTION_LABEL[kind] ?? "操作", before, await this.snapshot(listId));
+        this.record(listId, this.actionLabel(kind, extra), before, await this.snapshot(listId));
 
         // 插入即编辑：新节点建出来之后自动选中并进入编辑态。
         // 内核写回 → Protyle 重建 DOM → 我们重挂视图，这一串是异步的，
@@ -804,7 +955,7 @@ export class Scanner {
                 const idx = sibs.indexOf(first);
                 const anchor = idx > 0 ? sibs[idx - 1] : null;
                 if (!anchor) {
-                    return { ok: false, message: "降级失败：选中的第一项上面没有同级节点" };
+                    return { ok: false, message: this.t("err.batchIndentNoSibling", "降级失败：选中的第一项上面没有同级节点") };
                 }
                 failed = await indentNodesInto(targets, anchor);
                 break;
@@ -815,25 +966,37 @@ export class Scanner {
             case "delete":
                 failed = await deleteNodes(targets);
                 break;
+            case "check":
+            case "uncheck": {
+                // 勾选态有真正的批量接口（一次事务），不像上面几个是逐条调用 ——
+                // 所以这里不存在「改了一半」的中间态，failed 要么空要么全量。
+                const tasks = targets.filter((n) => n.kind === "task" && n.id);
+                // 混选时（普通段落 + 待办）不报错，但也别假装成功：一个待办都没有就直说
+                if (tasks.length === 0) {
+                    return { ok: false, message: this.t("msg.noTaskInSelection", "选中的节点里没有待办项") };
+                }
+                failed = await setTaskChecks(tasks, kind === "check");
+                break;
+            }
             default:
-                return { ok: false, message: "不支持的批量操作" };
+                return { ok: false, message: this.t("msg.unsupportedBatch", "不支持的批量操作") };
         }
 
         if (failed.length > 0) {
             if (!before) {
-                return { ok: false, message: "批量操作失败，请重试" };
+                return { ok: false, message: this.t("msg.batchFailed", "批量操作失败，请重试") };
             }
             const restored = await restoreBlock(listId, before);
             if (!restored) {
-                showMessage("批量操作失败，自动还原也没成功，请手动按 Ctrl+Z", 5000, "error");
-                return { ok: false, message: "操作失败，请重试" };
+                showMessage(this.t("msg.batchRollbackFailed", "批量操作失败，自动还原也没成功，请手动按 Ctrl+Z"), 5000, "error");
+                return { ok: false, message: this.t("msg.operationFailed", "操作失败，请重试") };
             }
             this.rescanSoon();
             this.focusSoon(listId);
-            return { ok: false, message: `批量${ACTION_LABEL[kind] ?? "操作"}失败，已还原到操作前` };
+            return { ok: false, message: this.t("msg.batchFail", "批量{act}失败，已还原到操作前", { act: this.actionLabel(kind) }) };
         }
 
-        this.record(listId, `批量${ACTION_LABEL[kind] ?? "操作"}`, before, await this.snapshot(listId));
+        this.record(listId, this.t("msg.batchLabel", "批量{act}", { act: this.actionLabel(kind) }), before, await this.snapshot(listId));
         this.rescanSoon();
         this.focusSoon(listId);
         return { ok: true };
@@ -884,10 +1047,19 @@ export class Scanner {
         if (!ok) {
             // 还原失败就把记录放回去，别让它凭空消失
             this.history.rollback(redo ? "redo" : "undo");
-            showMessage(`${redo ? "重做" : "撤销"}失败，请重试`, 3000, "error");
+            showMessage(this.t("msg.undoRedoFailed", "{act}失败，请重试", { act: redo ? this.t("act.redo", "重做") : this.t("act.undo", "撤销") }), 3000, "error");
             return;
         }
-        showMessage(`已${redo ? "重做" : "撤销"}：${entry.label}`, 2000);
+        // 块属性要单独补一次：`restoreBlock` 走的是 markdown 通道，
+        // 实测它保留块 ID 但**丢掉自定义块属性**（见 HistoryEntry.attrs 的注释）
+        if (entry.attrs) {
+            const want = redo ? entry.attrs.after : entry.attrs.before;
+            await setBlockAttrs(entry.attrs.id, { [ATTR_MARK]: want });
+            this.syncMarkToDom(entry.attrs.id, want);
+        }
+        // 内容整体写回去了，在途的乐观标记全部作废
+        this.clearMarkOverlays();
+        showMessage(this.t("msg.undoRedoDone", "已{act}：{label}", { act: redo ? this.t("act.redo", "重做") : this.t("act.undo", "撤销"), label: entry.label }), 2000);
         this.rescanSoon();
         // 还原同样是整块写回，Protyle 一样会把 `.list` 换掉、焦点一样会掉进编辑器，
         // 所以必须把焦点接回来 —— 否则「连按两次 Ctrl+Z」第二次根本没人接。
@@ -968,7 +1140,7 @@ export class Scanner {
         window.setTimeout(() => {
             const block = document.querySelector<HTMLElement>(`.protyle-wysiwyg [data-node-id="${contentId}"]`);
             if (!block) {
-                showMessage("没找到对应的段落，内容可能已被改动", 3000, "error");
+                showMessage(this.t("msg.paragraphGone", "没找到对应的段落，内容可能已被改动"), 3000, "error");
                 return;
             }
             block.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -1022,12 +1194,12 @@ export class Scanner {
 
         const text = document.createElement("span");
         text.className = "mm-backbar-text";
-        text.textContent = "已回到原文编辑（格式不会丢）";
+        text.textContent = this.t("msg.backToSource", "已回到原文编辑（格式不会丢）");
 
         const back = document.createElement("button");
         back.type = "button";
         back.className = "mm-backbar-btn";
-        back.textContent = "回到导图";
+        back.textContent = this.t("ui.backToMap", "回到导图");
         back.onclick = (e) => {
             e.stopPropagation();
             this.hideBackBar();
@@ -1063,7 +1235,7 @@ export class Scanner {
     private async remount(listId: string, layout: MMLayout) {
         const el = document.querySelector<HTMLElement>(`.list[data-node-id="${listId}"]`);
         if (!el) {
-            showMessage("没找到原来的列表块", 3000, "error");
+            showMessage(this.t("msg.originalListGone", "没找到原来的列表块"), 3000, "error");
             return;
         }
         this.suppressed.delete(listId);
@@ -1104,7 +1276,7 @@ export class Scanner {
                 if (await setOutlineFold(id, true)) n++;
             }
             await setBlockAttrs(listId, { [ATTR_LEGACY_FOLD]: null });
-            if (n > 0) showMessage(`已把 ${n} 个折叠状态迁移为思源原生折叠`, 4000);
+            if (n > 0) showMessage(this.t("msg.migratedFolds", "已把 {n} 个折叠状态迁移为思源原生折叠", { n }), 4000);
         } catch (err) {
             console.warn("[mindmap] 迁移旧折叠状态失败", listId, err);
         }

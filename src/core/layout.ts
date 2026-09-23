@@ -1,4 +1,5 @@
 import type { MMNode, MMLayout } from "../types";
+import { shownChildren } from "./tree";
 
 export interface LayoutOptions {
     mode: MMLayout;
@@ -42,7 +43,7 @@ export function layout(root: MMNode, opt: LayoutOptions): LayoutResult {
 
     /* ---------- 1. 自底向上计算每棵子树的交叉轴占位 ---------- */
     function measure(n: MMNode): number {
-        n.kids = n.folded ? [] : n.children;
+        n.kids = shownChildren(n);
         const self = crossSelf(n);
         if (n.kids.length === 0) {
             n.cross = self;

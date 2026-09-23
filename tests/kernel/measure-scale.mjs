@@ -10,6 +10,7 @@
  */
 import fs from "node:fs";
 import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -52,6 +53,12 @@ const CASES = [
 const chrome = await launch({ headless: true, port: 9341, width: 1680, height: 1050, dpr: 1 });
 const rows = [];
 
+/* ⚠️ 本支每轮循环都建一份文档，docId 是循环内的 const —— finally 里够不着，
+   所以要在外层留一个「当轮还没删掉的那个」的引用。
+   原先把清理写在循环体末尾：中途任何一步抛异常（本支要 newPage + waitFor，
+   超时是常事），那一轮就在用户笔记本里留下「临时-缩放测量-时间戳」。 */
+let pendingDocId = null;
+
 try {
     for (const [label, branches, per] of CASES) {
         const docRes = await api("/api/filetree/createDocWithMd", {
@@ -61,6 +68,7 @@ try {
         });
         if (docRes.code !== 0) throw new Error("建文档失败: " + JSON.stringify(docRes));
         const docId = docRes.data;
+        pendingDocId = docId;
         const listId = (await children(docId)).find((k) => k.type === "l").id;
         await api("/api/attr/setBlockAttrs", { id: listId, attrs: { "custom-mindmap": "logic" } });
 
@@ -102,9 +110,15 @@ try {
 
         const info = await api("/api/block/getBlockInfo", { id: docId });
         if (info.code === 0) await api("/api/filetree/removeDoc", { notebook: info.data.box, path: info.data.path });
+        pendingDocId = null; // 这一轮删干净了，finally 不用兜底
     }
 } finally {
     await chrome.close();
+    // 兜底：中途抛异常时，当轮那份还留着（pendingDocId 非空）
+    if (pendingDocId) {
+        const ok = await removeDoc(api, pendingDocId);
+        console.log(ok ? "已清理当轮临时文档" : "⚠️ 临时文档未能清理: " + pendingDocId);
+    }
 }
 
 console.log("\n可读性参考：正文 14px，缩到 8px 以下基本没法读，6px 以下只剩色块。");

@@ -5,6 +5,7 @@
  */
 import fs from "node:fs";
 import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -106,7 +107,7 @@ try {
     console.log("JS 点击后缩放:", await page.eval(`parseFloat(document.querySelector('.mm-root .mm-world').style.zoom) || 1`));
 } finally {
     await chrome.close();
-    const info = await api("/api/block/getBlockInfo", { id: docId });
-    if (info.code === 0) await api("/api/filetree/removeDoc", { notebook: info.data.box, path: info.data.path });
-    console.log("已清理");
+    // 统一走 _doc-cleanup 的两步法（getPathByID → removeDoc）；失败要出声
+    const ok = await removeDoc(api, docId);
+    console.log(ok ? "已清理" : "⚠️ 清理失败: " + docId);
 }

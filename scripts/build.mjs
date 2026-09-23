@@ -49,6 +49,10 @@ function retry(fn, tries = 5) {
 function copyStatic(css) {
     retry(() => fs.writeFileSync(p("index.css"), css, "utf8"));
 
+    // ⚠️ 根目录的 `i18n/` 是**构建产物**，真源是 `src/i18n/` —— 这里会先删后建。
+    // 改文案请改 `src/i18n/*.json`；直接改根目录那份，下一次构建就会被原样覆盖回去，
+    // 而且因为 index.js / plugin.json 走的是另一条 copyFileSync 路径、每次都正常更新，
+    // 现象会变成「代码改了生效了、文案改了死活不变」，非常难排查。
     // 先删再建只是为了清掉改名后残留的旧文件，本身不是构建的必要条件。
     // Windows 上这个目录偶尔会被外部进程占住，删不掉就退化成覆盖拷贝，
     // 不值得为它把整条构建链路搞挂。
@@ -168,6 +172,15 @@ function makePackageZip() {
 
 /* -------------------------------------------------------------------- 主流程 */
 
+/** 从 plugin.json 读版本号（读不到就报 `0.0.0`，构建不该因此失败） */
+function readPluginVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(p("plugin.json"), "utf8")).version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 const options = {
   entryPoints: [p("src/index.ts")],
   outfile: p("index.js"),
@@ -181,6 +194,16 @@ const options = {
   minify: !watch,
   sourcemap: watch ? "inline" : false,
   logLevel: "info",
+  /**
+   * 把 plugin.json 的版本号烘进产物。
+   *
+   * 诊断面板（P1-5）要报版本，而运行时的 `this.data` 在思源不同版本里
+   * 装的东西不一样，不能指望。从 plugin.json 读、构建时替换掉，
+   * 版本号就只有**一处**真相源 —— 改了 plugin.json 忘了改代码这种事不会发生。
+   */
+  define: {
+    __MM_VERSION__: JSON.stringify(readPluginVersion()),
+  },
 };
 
 async function run() {

@@ -1,3 +1,40 @@
+// src/core/marks.ts
+var ATTR_MARK = "custom-mindmap-mark";
+var MARK_LABEL_MAX = 8;
+function decodeMark(raw) {
+  if (!raw) return void 0;
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    const bare = raw.trim();
+    return bare && !bare.startsWith("{") ? { icon: bare.slice(0, 4) } : void 0;
+  }
+  if (!obj || typeof obj !== "object") return void 0;
+  const src = obj;
+  const mark = {};
+  if (typeof src.icon === "string" && src.icon.trim()) mark.icon = src.icon.trim().slice(0, 4);
+  if (typeof src.label === "string" && src.label.trim()) mark.label = src.label.trim().slice(0, MARK_LABEL_MAX);
+  if (typeof src.color === "string" && /^#[0-9a-fA-F]{3,8}$/.test(src.color.trim())) mark.color = src.color.trim();
+  return hasMark(mark) ? mark : void 0;
+}
+function encodeMark(mark) {
+  if (!mark) return null;
+  const out = {};
+  if (mark.icon) out.icon = mark.icon.slice(0, 4);
+  if (mark.label) out.label = mark.label.slice(0, MARK_LABEL_MAX);
+  if (mark.color) out.color = mark.color;
+  return hasMark(out) ? JSON.stringify(out) : null;
+}
+function hasMark(mark) {
+  return !!mark && !!(mark.icon || mark.label || mark.color);
+}
+function sameMark(a, b) {
+  const na = hasMark(a) ? encodeMark(a) : null;
+  const nb = hasMark(b) ? encodeMark(b) : null;
+  return na === nb;
+}
+
 // src/core/parser.ts
 var ZERO_WIDTH = /[\u200B-\u200D\u2060\uFEFF]/g;
 var HAS_TAG = /<(?!br\s*\/?>)[a-z!/][^>]*>/i;
@@ -44,6 +81,15 @@ function parseList(listEl, path = "") {
        * 不再需要插件自己维护一份 `custom-mindmap-fold`。
        */
       folded: li2.getAttribute("fold") === "1",
+      /**
+       * 节点标记（图标 / 标签 / 自定义色）。
+       *
+       * 思源把块的自定义属性**原样渲染成块元素的属性**（`custom-mindmap`
+       * 在 `.list` 上就是这么读的），所以这里直接读 `.li` 上的同名属性即可，
+       * 不需要额外打一次 `/api/attr/getBlockAttrs`。
+       * 读不到 / 读坏了都返回 undefined（见 marks.ts 的宽容解析）。
+       */
+      mark: decodeMark(li2.getAttribute(ATTR_MARK)),
       numbered,
       order,
       children,
@@ -126,6 +172,7 @@ function sanitizeByDom(html) {
     if (ce !== null && ce !== "false") el2.removeAttribute("contenteditable");
     el2.removeAttribute("spellcheck");
     el2.removeAttribute("data-render");
+    el2.removeAttribute("data-node-id");
     if (el2.classList?.contains("protyle-wysiwyg--select")) el2.classList.remove("protyle-wysiwyg--select");
   });
   frag.querySelectorAll("span").forEach((el2) => {
@@ -205,6 +252,92 @@ function flatten(root2) {
   return out;
 }
 
+// src/core/tree.ts
+var NEW_NODE_TEXT = "\u65B0\u8282\u70B9";
+function shownChildren(n) {
+  if (n.folded) return [];
+  return n.children.some((c) => c.hidden) ? n.children.filter((c) => !c.hidden) : n.children;
+}
+function isAncestor(a, b) {
+  let cur = b?.parent ?? null;
+  while (cur) {
+    if (cur === a) return true;
+    cur = cur.parent;
+  }
+  return false;
+}
+function indexInParent(node) {
+  return node.parent ? node.parent.children.indexOf(node) : -1;
+}
+function escapeMd(text) {
+  let s = text.replace(/([\\`*_[\]])/g, "\\$1");
+  s = s.replace(/^(\s*)([-+>#~|])/, (_m, sp, ch) => `${sp}\\${ch}`);
+  s = s.replace(/^(\s*)(\d+)([.)])/, (_m, sp, num, dot) => `${sp}${num}\\${dot}`);
+  return s;
+}
+var HAS_TAG2 = /<(?!br\s*\/?>)[a-z!/][^>]*>/i;
+function hasInlineFormat(node) {
+  return HAS_TAG2.test(node.html ?? "");
+}
+var IMG_SPAN_RE = /<span[^>]*data-type="img"[^>]*>\s*<img\b([^>]*?)\/?>\s*<\/span>/gi;
+var IMG_RE = /<img\b([^>]*?)\/?>/gi;
+function inlineOf(node) {
+  const html = (node.html ?? "").trim();
+  if (!html || !HAS_TAG2.test(html)) return escapeMd(node.text);
+  const imgMd = (attrs) => {
+    const src = attrs.match(/\bsrc="([^"]*)"/i)?.[1] ?? "";
+    const alt = (attrs.match(/\balt="([^"]*)"/i)?.[1] ?? "").replace(/[[\]()]/g, "");
+    return src ? `![${alt}](${src})` : "";
+  };
+  return html.replace(/\r?\n+/g, " ").replace(IMG_SPAN_RE, (_m, attrs) => imgMd(attrs)).replace(IMG_RE, (_m, attrs) => imgMd(attrs)).trim();
+}
+function markerOf(node) {
+  if (node.kind === "task") return "- [ ]";
+  if (node.numbered) return "1.";
+  return "-";
+}
+function newItemMarkdown(ref) {
+  if (ref.kind === "task") return `- [ ] ${NEW_NODE_TEXT}`;
+  if (ref.numbered) return `1. ${NEW_NODE_TEXT}`;
+  return `- ${NEW_NODE_TEXT}`;
+}
+function serializeSubtree(node, depth = 0) {
+  const indent = "  ".repeat(depth);
+  const line = `${indent}${markerOf(node)} ${inlineOf(node)}`;
+  if (node.children.length === 0) return line;
+  return [line, ...node.children.map((c) => serializeSubtree(c, depth + 1))].join("\n");
+}
+function canIndent(node) {
+  return !!node.id && indexInParent(node) > 0;
+}
+function canOutdent(node) {
+  return !!node.id && !!node.parent?.id;
+}
+function canMoveUp(node) {
+  return !!node.id && indexInParent(node) > 0;
+}
+function canMoveDown(node) {
+  const idx = indexInParent(node);
+  return !!node.id && !!node.parent && idx >= 0 && idx < node.parent.children.length - 1;
+}
+function canDelete(node) {
+  return !!node.id;
+}
+function canEdit(node) {
+  return !!node.contentId;
+}
+function topLevelOf(nodes) {
+  const set = new Set(nodes);
+  return nodes.filter((n) => {
+    let p2 = n.parent;
+    while (p2) {
+      if (set.has(p2)) return false;
+      p2 = p2.parent;
+    }
+    return true;
+  });
+}
+
 // src/core/layout.ts
 function layout(root2, opt) {
   const { mode, gapX, gapY, padX, padY } = opt;
@@ -213,7 +346,7 @@ function layout(root2, opt) {
   const crossSelf = (n) => isTree ? n.w : n.h;
   const depthSelf = (n) => isTree ? n.h : n.w;
   function measure(n) {
-    n.kids = n.folded ? [] : n.children;
+    n.kids = shownChildren(n);
     const self = crossSelf(n);
     if (n.kids.length === 0) {
       n.cross = self;
@@ -578,98 +711,84 @@ function decodeViewPrefs(raw) {
   return out;
 }
 
-// src/core/tree.ts
-var NEW_NODE_TEXT = "\u65B0\u8282\u70B9";
-function isAncestor(a, b) {
-  let cur = b?.parent ?? null;
-  while (cur) {
-    if (cur === a) return true;
-    cur = cur.parent;
-  }
-  return false;
-}
-function indexInParent(node) {
-  return node.parent ? node.parent.children.indexOf(node) : -1;
-}
-function escapeMd(text) {
-  let s = text.replace(/([\\`*_[\]])/g, "\\$1");
-  s = s.replace(/^(\s*)([-+>#~|])/, (_m, sp, ch) => `${sp}\\${ch}`);
-  s = s.replace(/^(\s*)(\d+)([.)])/, (_m, sp, num, dot) => `${sp}${num}\\${dot}`);
-  return s;
-}
-var HAS_TAG2 = /<(?!br\s*\/?>)[a-z!/][^>]*>/i;
-function hasInlineFormat(node) {
-  return HAS_TAG2.test(node.html ?? "");
-}
-var IMG_SPAN_RE = /<span[^>]*data-type="img"[^>]*>\s*<img\b([^>]*?)\/?>\s*<\/span>/gi;
-var IMG_RE = /<img\b([^>]*?)\/?>/gi;
-function inlineOf(node) {
-  const html = (node.html ?? "").trim();
-  if (!html || !HAS_TAG2.test(html)) return escapeMd(node.text);
-  const imgMd = (attrs) => {
-    const src = attrs.match(/\bsrc="([^"]*)"/i)?.[1] ?? "";
-    const alt = (attrs.match(/\balt="([^"]*)"/i)?.[1] ?? "").replace(/[[\]()]/g, "");
-    return src ? `![${alt}](${src})` : "";
-  };
-  return html.replace(/\r?\n+/g, " ").replace(IMG_SPAN_RE, (_m, attrs) => imgMd(attrs)).replace(IMG_RE, (_m, attrs) => imgMd(attrs)).trim();
-}
-function markerOf(node) {
-  if (node.kind === "task") return "- [ ]";
-  if (node.numbered) return "1.";
-  return "-";
-}
-function newItemMarkdown(ref) {
-  if (ref.kind === "task") return `- [ ] ${NEW_NODE_TEXT}`;
-  if (ref.numbered) return `1. ${NEW_NODE_TEXT}`;
-  return `- ${NEW_NODE_TEXT}`;
-}
-function serializeSubtree(node, depth = 0) {
-  const indent = "  ".repeat(depth);
-  const line = `${indent}${markerOf(node)} ${inlineOf(node)}`;
-  if (node.children.length === 0) return line;
-  return [line, ...node.children.map((c) => serializeSubtree(c, depth + 1))].join("\n");
-}
-function canIndent(node) {
-  return !!node.id && indexInParent(node) > 0;
-}
-function canOutdent(node) {
-  return !!node.id && !!node.parent?.id;
-}
-function canMoveUp(node) {
-  return !!node.id && indexInParent(node) > 0;
-}
-function canMoveDown(node) {
-  const idx = indexInParent(node);
-  return !!node.id && !!node.parent && idx >= 0 && idx < node.parent.children.length - 1;
-}
-function canDelete(node) {
-  return !!node.id;
-}
-function canEdit(node) {
-  return !!node.contentId;
-}
-function topLevelOf(nodes) {
-  const set = new Set(nodes);
-  return nodes.filter((n) => {
-    let p2 = n.parent;
-    while (p2) {
-      if (set.has(p2)) return false;
-      p2 = p2.parent;
+// src/core/diagnostics.ts
+var MAX = 24;
+var notes = [];
+var installed = false;
+function stringify(args) {
+  return args.map((a) => {
+    if (typeof a === "string") return a;
+    if (a instanceof Error) return `${a.name}: ${a.message}`;
+    try {
+      return JSON.stringify(a);
+    } catch {
+      return String(a);
     }
-    return true;
-  });
+  }).join(" ").replace(/\s+/g, " ").slice(0, 400);
+}
+function installDiagnostics() {
+  if (installed) return;
+  installed = true;
+  for (const level of ["warn", "error"]) {
+    const orig = console[level].bind(console);
+    console[level] = (...args) => {
+      try {
+        const text = stringify(args);
+        if (text.includes("[mindmap]")) {
+          notes.push({ at: Date.now(), level, text });
+          if (notes.length > MAX) notes.shift();
+        }
+      } catch {
+      }
+      orig(...args);
+    };
+  }
+}
+function recentNotes() {
+  return notes.slice();
+}
+function clearNotes() {
+  notes.length = 0;
+}
+function hhmmss(ms) {
+  const d = new Date(ms);
+  const p2 = (n) => String(n).padStart(2, "0");
+  return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+}
+function formatNotes() {
+  if (notes.length === 0) return "\uFF08\u672C\u6B21\u4F1A\u8BDD\u6CA1\u6709 [mindmap] \u8B66\u544A\u6216\u9519\u8BEF\uFF09";
+  return notes.map((n) => `  ${hhmmss(n.at)} [${n.level}] ${n.text}`).join("\n");
+}
+function stamp(ms = Date.now()) {
+  const d = new Date(ms);
+  const p2 = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+}
+
+// src/utils/hotkey.ts
+function readableHotkey(hotkey, isMac) {
+  if (!hotkey) return "";
+  if (isMac) return hotkey;
+  const parts = [];
+  if (/[⌘⌃]/.test(hotkey)) parts.push("Ctrl");
+  if (hotkey.includes("\u21E7")) parts.push("Shift");
+  if (hotkey.includes("\u2325")) parts.push("Alt");
+  const key = hotkey.replace(/[⌘⌥⇧⌃]/g, "");
+  if (key) parts.push(key);
+  return parts.join("+");
 }
 
 // tests/entry.ts
 var g = globalThis;
 var passed = 0;
 var failures = [];
-function ok(cond, msg) {
+function ok(cond, msg, detail) {
   if (cond) {
     passed++;
   } else {
-    failures.push(msg);
-    console.error(`  \u2717 ${msg}`);
+    const line = detail === void 0 ? msg : `${msg} \u2014\u2014 ${String(detail)}`;
+    failures.push(line);
+    console.error(`  \u2717 ${line}`);
   }
 }
 function eq(actual, expected, msg) {
@@ -683,6 +802,7 @@ function el(spec) {
   if (spec.id) node.dataset.nodeId = spec.id;
   if (spec.subtype) node.dataset.subtype = spec.subtype;
   for (const c of spec.cls ?? []) node.classList.add(c);
+  for (const [k, v] of Object.entries(spec.attrs ?? {})) node.setAttribute(k, v);
   node.innerHTML = spec.html ?? "";
   node.textContent = spec.text ?? "";
   for (const child of spec.children ?? []) node.appendChild(el(child));
@@ -694,9 +814,10 @@ var p = (id, text, html) => ({
   text,
   html: html ?? text
 });
-var li = (id, content, sub, cls = []) => ({
+var li = (id, content, sub, cls = [], attrs) => ({
   id,
   cls: ["li", ...cls],
+  attrs,
   children: sub ? [content, sub] : [content]
 });
 var list = (subtype, id, items2) => ({
@@ -1157,6 +1278,111 @@ console.log("[10] \u6279\u91CF\u64CD\u4F5C\uFF08\u9009\u4E2D\u9879\u6574\u7406\u
   eq(topLevelOf([r2.children[0], r2.children[1]]).length, 2, "\u4E92\u4E0D\u5305\u542B\u7684\u9009\u4E2D\u9879\u90FD\u4FDD\u7559");
   eq(topLevelOf([]).length, 0, "\u7A7A\u9009\u62E9\u8FD4\u56DE\u7A7A");
   eq(topLevelOf([b]).length, 1, "\u53EA\u9009\u4E86\u5B50\u8282\u70B9\u65F6\u539F\u6837\u4FDD\u7559");
+}
+console.log("[11] \u8282\u70B9\u6807\u8BB0\u7684\u7F16\u89E3\u7801\u4E0E\u89E3\u6790");
+{
+  eq(encodeMark(null), null, "\u7A7A\u6807\u8BB0\u7F16\u7801\u6210 null\uFF08\u5199\u56DE\u65F6\u8868\u793A\u5220\u6389\u5C5E\u6027\uFF0C\u800C\u4E0D\u662F\u5199\u7A7A\u4E32\uFF09");
+  eq(encodeMark({}), null, "\u5168\u662F\u7A7A\u5B57\u6BB5\u4E5F\u5F53\u4F5C\u6CA1\u6709\u6807\u8BB0");
+  eq(decodeMark(null), void 0, "\u6CA1\u6709\u5C5E\u6027 \u2192 \u6CA1\u6709\u6807\u8BB0");
+  eq(decodeMark(""), void 0, "\u7A7A\u5C5E\u6027 \u2192 \u6CA1\u6709\u6807\u8BB0");
+  eq(decodeMark("   "), void 0, "\u5168\u7A7A\u767D\u5C5E\u6027 \u2192 \u6CA1\u6709\u6807\u8BB0");
+  eq(decodeMark("\u2B50")?.icon, "\u2B50", "\u88F8\u5B57\u7B26\u4E32\u6309\u56FE\u6807\u89E3\u6790\uFF08\u7528\u6237\u624B\u5199\u5C5E\u6027\u4E5F\u80FD\u7528\uFF09");
+  eq(decodeMark("{\u574F JSON"), void 0, "\u4EE5 { \u5F00\u5934\u4F46\u89E3\u6790\u4E0D\u4E86 \u2192 \u5F53\u4F5C\u6CA1\u6709\u6807\u8BB0\uFF0C\u4E0D\u629B\u5F02\u5E38");
+  eq(decodeMark("null"), void 0, "JSON null \u2192 \u6CA1\u6709\u6807\u8BB0");
+  eq(decodeMark('"\u5B57\u7B26\u4E32"'), void 0, "JSON \u5B57\u7B26\u4E32 \u2192 \u6CA1\u6709\u6807\u8BB0");
+  eq(decodeMark("[1,2]"), void 0, "JSON \u6570\u7EC4 \u2192 \u6CA1\u6709\u6807\u8BB0");
+  const full = { icon: "\u2B50", label: "\u91CD\u8981", color: "#e5534b" };
+  const back = decodeMark(encodeMark(full));
+  eq(back?.icon, "\u2B50", "\u5F80\u8FD4\u4FDD\u4F4F\u56FE\u6807");
+  eq(back?.label, "\u91CD\u8981", "\u5F80\u8FD4\u4FDD\u4F4F\u6807\u7B7E");
+  eq(back?.color, "#e5534b", "\u5F80\u8FD4\u4FDD\u4F4F\u989C\u8272");
+  eq(decodeMark('{"label":"\u4E00\u4E8C\u4E09\u56DB\u4E94\u516D\u4E03\u516B\u4E5D\u5341"}')?.label, "\u4E00\u4E8C\u4E09\u56DB\u4E94\u516D\u4E03\u516B", "\u6807\u7B7E\u8D85\u957F\u622A\u65AD\u5230 8 \u4E2A\u5B57");
+  eq(decodeMark('{"color":"red"}'), void 0, "\u975E\u6CD5\u989C\u8272\u88AB\u4E22\u5F03\uFF08\u53EA\u5269\u7A7A\u6807\u8BB0 = \u6CA1\u6709\u6807\u8BB0\uFF09");
+  eq(decodeMark('{"color":"#GGG"}'), void 0, "\u975E\u5341\u516D\u8FDB\u5236\u989C\u8272\u88AB\u4E22\u5F03");
+  eq(decodeMark('{"icon":123}'), void 0, "\u56FE\u6807\u4E0D\u662F\u5B57\u7B26\u4E32 \u2192 \u4E22\u5F03");
+  eq(hasMark({ color: "#fff" }), true, "\u53EA\u6709\u989C\u8272\u4E5F\u7B97\u6709\u6807\u8BB0");
+  eq(hasMark({}), false, "\u7A7A\u5BF9\u8C61\u4E0D\u7B97\u6807\u8BB0");
+  eq(sameMark(void 0, void 0), true, "\u90FD\u6CA1\u6807\u8BB0 \u2192 \u76F8\u540C");
+  eq(sameMark(void 0, {}), true, "\u6CA1\u6709\u6807\u8BB0 vs \u7A7A\u6807\u8BB0 \u2192 \u76F8\u540C");
+  eq(sameMark({ icon: "\u2B50" }, { icon: "\u2B50" }), true, "\u540C\u4E00\u5957\u6807\u8BB0 \u2192 \u76F8\u540C");
+  eq(sameMark({ icon: "\u2B50" }, { icon: "\u{1F525}" }), false, "\u6362\u4E86\u56FE\u6807 \u2192 \u4E0D\u540C");
+  eq(sameMark({ icon: "\u2B50" }, { icon: "\u2B50", color: "#e5534b" }), false, "\u591A\u4E86\u4E00\u4E2A\u989C\u8272 \u2192 \u4E0D\u540C");
+  const marked = list("u", "LM", [
+    li("M1", p("MP1", "\u5E26\u6807\u8BB0"), void 0, [], { [ATTR_MARK]: '{"icon":"\u2B50","label":"\u91CD\u8981"}' }),
+    li("M2", p("MP2", "\u6CA1\u6807\u8BB0")),
+    li("M3", p("MP3", "\u574F\u5C5E\u6027"), void 0, [], { [ATTR_MARK]: "{\u574F" })
+  ]);
+  const nodes = parseList(el(marked));
+  eq(nodes[0].mark?.icon, "\u2B50", "parseList \u4ECE\u5757\u5C5E\u6027\u8BFB\u51FA\u56FE\u6807");
+  eq(nodes[0].mark?.label, "\u91CD\u8981", "parseList \u4ECE\u5757\u5C5E\u6027\u8BFB\u51FA\u6807\u7B7E");
+  eq(nodes[1].mark, void 0, "\u6CA1\u6709\u5C5E\u6027\u7684\u8282\u70B9\u6CA1\u6709\u6807\u8BB0");
+  eq(nodes[2].mark, void 0, "\u5C5E\u6027\u574F\u6389\u7684\u8282\u70B9\u6309\u300C\u6CA1\u6709\u6807\u8BB0\u300D\u5904\u7406\uFF0C\u4E0D\u5F71\u54CD\u5176\u5B83\u8282\u70B9");
+  eq(nodes[0].text, "\u5E26\u6807\u8BB0", "\u6807\u8BB0\u4E0D\u4F1A\u6DF7\u8FDB\u8282\u70B9\u6587\u5B57");
+}
+console.log("[12] \u8BCA\u65AD\u4FE1\u606F\u7684\u6536\u96C6\u4E0E\u683C\u5F0F\u5316");
+{
+  const realWarn = console.warn;
+  const realErr = console.error;
+  const forwarded = [];
+  console.warn = (...a) => {
+    forwarded.push(a.map(String).join(" "));
+  };
+  console.error = (...a) => {
+    forwarded.push(a.map(String).join(" "));
+  };
+  installDiagnostics();
+  clearNotes();
+  console.warn("[mindmap] \u7532\uFF1A\u5199\u5185\u6838\u5931\u8D25");
+  eq(recentNotes().length, 1, "\u5E26 [mindmap] \u7684\u8B66\u544A\u88AB\u8BB0\u4E0B\u6765\u4E86");
+  eq(forwarded.length, 1, "\u539F\u65E5\u5FD7\u7167\u5E38\u5F80\u4E0B\u4F20\uFF08\u6CA1\u6709\u88AB\u300C\u8BB0\u5F55\u300D\u541E\u6389\uFF09");
+  eq(forwarded[0], "[mindmap] \u7532\uFF1A\u5199\u5185\u6838\u5931\u8D25", "\u4F20\u4E0B\u53BB\u7684\u8FD8\u662F\u539F\u6587");
+  console.warn("\u8FD9\u662F\u601D\u6E90\u672C\u4F53\u6216\u522B\u7684\u63D2\u4EF6\u5199\u7684\uFF0C\u4E0D\u8BE5\u6536");
+  eq(recentNotes().length, 1, "\u4E0D\u5E26 [mindmap] \u7684\u65E5\u5FD7\u4E0D\u4F1A\u6324\u8FDB\u6765");
+  eq(forwarded.length, 2, "\u4F46\u5B83\u5728\u63A7\u5236\u53F0\u91CC\u7167\u65E7\u53EF\u89C1");
+  console.error("[mindmap] \u4E59\uFF1A\u5185\u6838\u62D2\u7EDD\u4E86");
+  eq(recentNotes().length, 2, "error \u4E5F\u6536");
+  eq(recentNotes()[1].level, "error", "\u7EA7\u522B\u8BB0\u5BF9\u4E86");
+  console.warn("[mindmap] \u4E19", { a: 1 }, new Error("\u70B8\u4E86"));
+  const note = recentNotes()[2].text;
+  ok(note.includes('{"a":1}'), "\u5BF9\u8C61\u53C2\u6570\u8D70 JSON", note);
+  ok(note.includes("Error: \u70B8\u4E86"), "\u5F02\u5E38\u53C2\u6570\u5E26\u4E0A message", note);
+  ok(!note.includes("\n"), "\u538B\u6210\u4E86\u4E00\u884C\uFF08\u8BCA\u65AD\u4FE1\u606F\u662F\u7ED9\u4EBA\u770B\u7684\uFF0C\u591A\u884C\u4F1A\u6563\u67B6\uFF09");
+  clearNotes();
+  for (let i = 0; i < 30; i++) console.warn(`[mindmap] \u7B2C ${i} \u6761`);
+  eq(recentNotes().length, 24, "\u6700\u591A\u7559 24 \u6761\uFF08\u6392\u969C\u770B\u7684\u662F\u6700\u8FD1\u53D1\u751F\u4E86\u4EC0\u4E48\uFF0C\u4E0D\u662F\u5B8C\u6574\u65E5\u5FD7\uFF09");
+  eq(recentNotes()[0].text, "[mindmap] \u7B2C 6 \u6761", "\u6324\u6389\u7684\u662F\u6700\u8001\u7684\uFF0C\u7559\u4E0B\u7684\u662F\u6700\u8FD1\u7684");
+  eq(recentNotes()[23].text, "[mindmap] \u7B2C 29 \u6761", "\u6700\u540E\u4E00\u6761\u5728");
+  const fmt = formatNotes();
+  ok(/^\s+\d{2}:\d{2}:\d{2} \[warn\] \[mindmap\] 第 6 条/.test(fmt), "\u6BCF\u6761\u524D\u9762\u6302\u4E0A\u65F6\u95F4\u4E0E\u7EA7\u522B", fmt.split("\n")[0]);
+  eq(fmt.split("\n").length, 24, "\u4E00\u884C\u4E00\u6761");
+  clearNotes();
+  eq(formatNotes(), "\uFF08\u672C\u6B21\u4F1A\u8BDD\u6CA1\u6709 [mindmap] \u8B66\u544A\u6216\u9519\u8BEF\uFF09", "\u6CA1\u6709\u8BB0\u5F55\u65F6\u8BF4\u6E05\u695A\u300C\u6CA1\u6709\u300D\uFF0C\u800C\u4E0D\u662F\u7559\u4E00\u7247\u7A7A\u767D");
+  const fixed = new Date(2026, 8, 19, 10, 4, 9).getTime();
+  eq(stamp(fixed), "2026-09-19 10:04:09", "\u65F6\u95F4\u6233\u8865\u96F6\u5230\u79D2\uFF08\u4E00\u773C\u80FD\u770B\u51FA\u662F\u54EA\u4E00\u6B21\u4F1A\u8BDD\uFF09");
+  eq(stamp(new Date(2026, 0, 2, 3, 4, 5).getTime()), "2026-01-02 03:04:05", "\u4E2A\u4F4D\u6570\u6708\u4EFD / \u65E5\u671F\u4E5F\u8865\u96F6");
+  installDiagnostics();
+  clearNotes();
+  console.warn("[mindmap] \u4E01");
+  eq(recentNotes().length, 1, "\u91CD\u590D\u5B89\u88C5\u53EA\u751F\u6548\u4E00\u6B21\uFF08\u70ED\u91CD\u8F7D\u4E0D\u4F1A\u5957\u5A03\u8BB0\u4E24\u904D\uFF09");
+  console.warn = realWarn;
+  console.error = realErr;
+}
+{
+  console.log("\n[13] \u952E\u4F4D\u6362\u7B97\uFF1A\u601D\u6E90\u8868\u793A\u6CD5 \u2192 \u5E73\u53F0\u53EF\u8BFB\u5199\u6CD5");
+  eq(readableHotkey("\u2325\u2318D", true), "\u2325\u2318D", "macOS \u4E0A\u539F\u6837\u4FDD\u7559\uFF08\u601D\u6E90\u81EA\u5DF1\u7684\u8868\u793A\u6CD5\u5C31\u662F\u8FD9\u4E2A\uFF09");
+  eq(readableHotkey("\u2318Z", true), "\u2318Z", "macOS \u4E0A\u5355\u4FEE\u9970\u952E\u4E5F\u4E0D\u52A8");
+  eq(readableHotkey("\u2325\u2318D", false), "Ctrl+Alt+D", "\u2605 Windows \u4E0A \u2325\u2318D \u2192 Ctrl+Alt+D\uFF08\u4E0E\u601D\u6E90\u83DC\u5355\u7684\u5199\u6CD5\u4E00\u81F4\uFF09");
+  eq(readableHotkey("\u2325\u2318V", false), "Ctrl+Alt+V", "\u2605 \u53E6\u4E00\u6761\u540C\u7406");
+  eq(readableHotkey("\u2318Z", false), "Ctrl+Z", "\u5355 \u2318 \u2192 Ctrl");
+  eq(readableHotkey("\u2325P", false), "Alt+P", "\u5355 \u2325 \u2192 Alt\uFF08\u601D\u6E90\u83DC\u5355\u91CC\u300C\u8BBE\u7F6E\u300D\u5C31\u662F\u8FD9\u4E48\u663E\u793A\u7684\uFF09");
+  eq(readableHotkey("\u2325\u2318P", false), "Ctrl+Alt+P", "\u2605 \u987A\u5E8F Ctrl \u5728 Alt \u524D\uFF08\u5BF9\u9F50\u601D\u6E90\u83DC\u5355\u91CC\u7684\u300C\u9B54\u6CD5\u6392\u7248 Ctrl+Alt+P\u300D\uFF09");
+  eq(readableHotkey("\u21E7\u2318F", false), "Ctrl+Shift+F", "\u2605 \u987A\u5E8F Ctrl \u5728 Shift \u524D\uFF08\u5BF9\u9F50\u601D\u6E90\u300C\u56FA\u5B9A\u641C\u7D22 Ctrl+Shift+F\u300D\uFF09");
+  eq(readableHotkey("\u2325\u21E7P", false), "Shift+Alt+P", "\u2605\u2605 \u987A\u5E8F Shift \u5728 Alt \u524D\uFF08\u5BF9\u9F50\u601D\u6E90\u300C\u547D\u4EE4\u9762\u677F Shift+Alt+P\u300D\uFF09");
+  eq(readableHotkey("\u2325\u21E7\u2193", false), "Shift+Alt+\u2193", "\u5E26\u65B9\u5411\u952E\u4E3B\u952E\u7684\u7EC4\u5408\u540C\u6837\u6210\u7ACB");
+  eq(readableHotkey("F2", false), "F2", "\u6CA1\u6709\u4FEE\u9970\u952E\u65F6\u539F\u6837\u8FD4\u56DE\uFF08\u4E0D\u80FD\u88AB\u6362\u7B97\u5403\u6389\uFF09");
+  eq(readableHotkey("\u2318\\", false), "Ctrl+\\", "\u53CD\u659C\u6760\u8FD9\u7C7B\u4E3B\u952E\u4E5F\u8981\u7559\u4E0B\u6765");
+  eq(readableHotkey("", false), "", "\u7A7A\u4E32\u8FD4\u56DE\u7A7A\u4E32\uFF08\u8FC1\u79FB\u547D\u4EE4\u6545\u610F\u4E0D\u7ED1\u952E\uFF0C\u4E0D\u80FD\u53D8\u6210 Ctrl+\uFF09");
+  eq(readableHotkey(readableHotkey("\u2325\u2318D", false), false), "Ctrl+Alt+D", "\u6362\u7B97\u8FC7\u7684\u4E32\u518D\u7B97\u4E00\u6B21\u7ED3\u679C\u4E0D\u53D8");
 }
 console.log("");
 if (failures.length === 0) {

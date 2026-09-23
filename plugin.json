@@ -2,8 +2,8 @@
   "name": "siyuan-plugin-mindmap",
   "author": "MindMap Plugin",
   "url": "https://github.com/your-name/siyuan-plugin-mindmap",
-  "version": "0.1.0",
-  "minAppVersion": "3.1.0",
+  "version": "1.0.0",
+  "minAppVersion": "3.6.4",
   "backends": [
     "all"
   ],

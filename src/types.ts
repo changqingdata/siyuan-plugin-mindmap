@@ -33,7 +33,15 @@ export type MMActionKind =
     | "fold"
     | "unfold"
     | "locate"
-    | "copy";
+    | "copy"
+    /**
+     * 勾选 / 取消勾选一个待办节点。
+     *
+     * 写回走内核的 `/api/block/updateTaskListItemMarker`，**不是**更新段落内容 ——
+     * 勾选态在列表项（`NodeListItem`）的 marker 上，不在段落里。
+     * 详见 `utils/api.ts` 里 `setTaskMarker` 的注释（另外两条路都是错的，有实测记录）。
+     */
+    | "toggleCheck";
 
 /** 拖拽落点语义 */
 export type MMDropPosition = "before" | "after" | "child";
@@ -46,6 +54,15 @@ export interface MMActionExtra {
     position?: MMDropPosition;
     /** paste 动作携带的 markdown 片段 */
     data?: string;
+    /**
+     * `toggleCheck` 的**目标态**（true = 要勾上）。
+     *
+     * 必须显式传，不能在执行侧用 `!node.checked` 反推 ——
+     * 渲染层为了做乐观 UI，在派发动作**之前**就把 `node.checked` 翻成了目标态，
+     * 执行侧再取反一次就正好写回原值：一次原地踏步的空写。
+     * 表现出来是「点一下，界面勾上了，内核纹丝不动」。
+     */
+    checked?: boolean;
 }
 
 /**
@@ -104,12 +121,31 @@ export interface MMNode {
     kind: MMNodeKind;
     checked?: boolean;
     /**
+     * 节点标记（图标 / 标签 / 自定义色），来自块属性 `custom-mindmap-mark`。
+     *
+     * 解析层每次重渲染都从 DOM 属性重新读，所以「改标记」和「改文字」一样，
+     * 走的是同一条路：写内核 → 内核回推 DOM → 重渲染。视图侧不缓存它。
+     */
+    mark?: MMNodeMark;
+    /**
      * 折叠态。
      *
      * 直接来自思源原生的列表折叠（`.li[fold="1"]`）—— 没有插件私有副本，
      * 所以「大纲什么状态、导图就是什么状态」是结构上成立的，不需要两边对表。
      */
     folded: boolean;
+    /**
+     * 被**过滤器**排除（P1-1「只看未完成 / 只看已完成」）。
+     *
+     * 与 `folded` 分开存，是因为两者语义完全不同：
+     *   - `folded` 是**用户对大纲的折叠意图**，会写回内核（`.li[fold="1"]`），是持久状态；
+     *   - `hidden` 纯粹是**当前这次浏览的筛选结果**，只活在内存里，退出视图即消失，
+     *     绝不写回内核 —— 否则「看了一眼未完成」就会把大纲的折叠态改掉。
+     *
+     * 两者对布局的效果一样：都不参与布局、不画连线、导航跳过。
+     * 判据统一收在 `shownChildren()` 里，别在这里各写各的。
+     */
+    hidden?: boolean;
     /** 所属列表是否为有序列表 —— 决定是否显示层级编号 */
     numbered: boolean;
     /** 层级编号，如 1.2.1 */
@@ -293,7 +329,66 @@ export const ATTR_LEGACY_FOLD = "custom-mindmap-fold";
 export const ATTR_VIEW_PREFS = "custom-mindmap-view";
 
 /** 批量操作条上支持的批量动作 */
-export type MMBatchKind = "indent" | "outdent" | "fold" | "unfold" | "delete" | "export";
+export type MMBatchKind =
+    | "indent"
+    | "outdent"
+    | "fold"
+    | "unfold"
+    | "delete"
+    | "export"
+    /** 把选中的待办节点整体标记为已完成 */
+    | "check"
+    /** 把选中的待办节点整体标记为未完成 */
+    | "uncheck";
+
+/* ==================================================================== 过滤 / 跨图搜索 */
+
+/**
+ * 状态过滤器。
+ *
+ * 只覆盖「勾选态」这一个维度 —— 它是任务列表场景里唯一真正高频的筛选需求。
+ * 找标签（`#tag`）之类的用搜索框即可，不必再堆一排 chip。
+ */
+export type MMFilter = "all" | "todo" | "done";
+
+/** 过滤器在搜索框旁显示的名字 */
+export const FILTER_LABEL: Record<MMFilter, string> = {
+    all: "全部",
+    todo: "未完成",
+    done: "已完成",
+};
+
+/**
+ * 跨图搜索的一条命中。
+ *
+ * 由 `searchDocOutline()` 从内核直接查出来（一次 SQL，不做递归往返），
+ * 所以这里只有纯数据，没有 MMNode —— 命中的节点很可能**根本不在当前这张图里**。
+ */
+export interface MMSearchHit {
+    /** 块 ID */
+    id: string;
+    /** 节点文字 */
+    text: string;
+    /** 所属列表块 ID —— 用来判断「是不是当前这张图」 */
+    listId: string;
+    /** 从顶层节点到自身的路径，如 `顶层任务 › 甲任务`，用来给结果定位 */
+    path: string;
+}
+
+/**
+ * 节点标记（P1-2）。
+ *
+ * 存在块属性 `custom-mindmap-mark` 上（见 `core/marks.ts`），
+ * 不破坏「块是唯一真相源」—— 复制块、反查、导出、换设备都跟着走。
+ */
+export interface MMNodeMark {
+    /** 图标（emoji） */
+    icon?: string;
+    /** 标签文字 */
+    label?: string;
+    /** 自定义色（十六进制），覆盖分支色 */
+    color?: string;
+}
 
 /** 在列表块元素上的挂载标记 */
 export const MOUNT_FLAG = "data-mm-mounted";

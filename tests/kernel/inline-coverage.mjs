@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { launch, sleep } from "../cdp.mjs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -24,6 +25,22 @@ const TOKEN = process.env.SIYUAN_TOKEN || conf.api?.token || "";
 // 阶段：b（默认，覆盖度盘点）/ edit（进编辑态改名，验证格式是否被抹）
 // 两种写法都支持：MM_PHASE=edit node …  或  node … edit
 const PHASE = process.env.MM_PHASE || process.argv[2] || "";
+
+/**
+ * 失败收集器 —— 本支原先**只有判定、没有门**：
+ * 三处判定（改名后格式是否保住 / Ctrl+D 是否插出新块 / Ctrl+单击是否打开链接）
+ * 都只打印 ✔/✘，红绿传不出去。于是它红着也能让 `kernel:inline:all` 返回 0，
+ * 进套件等于没进。判据：这三条都是「产品应该做到的事」——
+ * 红了就说明产品坏了（不是「我搞错了」），所以配当门。
+ *
+ * ⚠️ 注意区分：同目录的 `copy-fidelity.mjs` 也打印一堆 ✘，但那是**探针结论**
+ * （「这种格式复制后会丢」就是要记录的事实），给它加门会造出一扇永远红的门。
+ */
+const problems = [];
+const fail = (msg) => {
+    problems.push(msg);
+    console.log(`  ✘ [记入失败] ${msg}`);
+};
 
 async function api(p, payload) {
     const res = await fetch(KERNEL + p, {
@@ -230,7 +247,14 @@ try {
             const el = document.querySelectorAll('.mm-root:not(.mm-root--dialog) .mm-node')[1];
             if (!el) return null;
             const r = el.getBoundingClientRect();
-            return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), id: el.dataset.nodeId };
+            // ⚠️ 属性名是 data-mm-id（dataset.mmId），不是 data-node-id。
+            //    原因见 src/core/renderer.ts 的长注释：思源前端按
+            //    [data-node-id="…"] 在全文档里查元素，导图长在 .protyle-wysiwyg
+            //    里面，用同名属性会和真大纲块撞车。这里原先写成 dataset.nodeId，
+            //    读到的是 undefined —— copy 阶段因此
+            //    getBlockDOM({id: undefined}) 返回 data=null，直接 TypeError 崩掉。
+            //    （本段在 page.eval 的模板字符串里，注释里不能出现反引号。）
+            return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), id: el.dataset.mmId };
         })()`);
         console.log("  目标节点:", JSON.stringify(target));
         if (target) {
@@ -285,7 +309,9 @@ try {
             for (let i = 0; i < marks.length; i++) {
                 const [label, re] = marks[i];
                 const now = count(after, re);
-                console.log(`    ${label.padEnd(12)} ${beforeCounts[i]} → ${now}  ${now >= beforeCounts[i] ? "✔ 保住了" : "✘ 丢了"}`);
+                const kept = now >= beforeCounts[i];
+                console.log(`    ${label.padEnd(12)} ${beforeCounts[i]} → ${now}  ${kept ? "✔ 保住了" : "✘ 丢了"}`);
+                if (!kept) fail(`改名后 ${label} 格式丢了（${beforeCounts[i]} → ${now}）`);
             }
             console.log(`  文字是否真的改了: ${after.includes("改过") ? "✔ 改了" : "✘ 没改（可能没聚焦成功）"}`);
             console.log(`  改字前后（剥掉块属性后）一致: ${strip(before) === strip(after) ? "是（说明字没改成功）" : "否（字已改）"}`);
@@ -309,7 +335,14 @@ try {
             const el = document.querySelectorAll('.mm-root:not(.mm-root--dialog) .mm-node')[1];
             if (!el) return null;
             const r = el.getBoundingClientRect();
-            return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), id: el.dataset.nodeId };
+            // ⚠️ 属性名是 data-mm-id（dataset.mmId），不是 data-node-id。
+            //    原因见 src/core/renderer.ts 的长注释：思源前端按
+            //    [data-node-id="…"] 在全文档里查元素，导图长在 .protyle-wysiwyg
+            //    里面，用同名属性会和真大纲块撞车。这里原先写成 dataset.nodeId，
+            //    读到的是 undefined —— copy 阶段因此
+            //    getBlockDOM({id: undefined}) 返回 data=null，直接 TypeError 崩掉。
+            //    （本段在 page.eval 的模板字符串里，注释里不能出现反引号。）
+            return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), id: el.dataset.mmId };
         })()`);
         console.log("  目标节点:", JSON.stringify(target));
 
@@ -327,7 +360,7 @@ try {
             const fresh = (await allItems(listId)).filter((i) => !itemsBefore.includes(i.id));
             console.log(`  新增块数: ${fresh.length}`);
             if (fresh.length === 0) {
-                console.log("  ✘ 没有新块 —— Ctrl+D 可能没被导图接管（焦点丢了？）");
+                fail("Ctrl+D 没有插出新块 —— 可能没被导图接管（焦点丢了？）");
             }
             for (const f of fresh) {
                 const dom = (await api("/api/block/getBlockDOM", { id: f.id })).data.dom;
@@ -371,7 +404,9 @@ try {
             await sleep(350);
             const opened = await page.eval("window.__mmOpened");
             console.log(`  Ctrl+单击后 window.open: ${JSON.stringify(opened)}`);
-            console.log(`  结论: ${opened.includes(box.href) ? "✔ 打开了链接" : "✘ 没打开"}`);
+            const didOpen = opened.includes(box.href);
+            console.log(`  结论: ${didOpen ? "✔ 打开了链接" : "✘ 没打开"}`);
+            if (!didOpen) fail("Ctrl+单击没有打开链接");
         }
     }
 
@@ -389,13 +424,28 @@ try {
         console.log(`\n截图 → ${shot}`);
     }
 
-    if (!process.env.MM_KEEP) {
-        const info = (await api("/api/block/getBlockInfo", { id: docId })).data;
-        await api("/api/filetree/removeDoc", { notebook: info.box, path: info.path });
-        console.log("\n已清理临时文档");
+    /* ---- 汇总：判定要能传出去（退出码） ---- */
+    console.log("\n" + "=".repeat(60));
+    if (problems.length) {
+        console.log(`✘ ${PHASE || "b"} 阶段失败 ${problems.length} 项：`);
+        for (const p of problems) console.log("   · " + p);
+        process.exitCode = 1;
     } else {
-        console.log("\nMM_KEEP=1，保留文档:", docId);
+        console.log(`✔ ${PHASE || "b"} 阶段全部通过`);
     }
+
 } finally {
     await chrome.close();
+    /* ⚠️ 清理放 finally —— 放 try 末尾的话，中间任何一步抛异常都会跳过清理。
+       本支就崩过（在 .mm-node 上读 dataset.nodeId → getBlockDOM({id: undefined})
+       → data 为 null → TypeError），一崩就在用户笔记本里留下
+       「临时-行内覆盖度-时间戳」。实测本轮正是它漏了 1 个。
+       删文档走 _doc-cleanup 的两步法（getPathByID → removeDoc），
+       直接传 {id} 会报「Field [notebook] is required」而被静默吞掉。 */
+    if (docId && !process.env.MM_KEEP) {
+        const ok = await removeDoc(api, docId);
+        console.log(ok ? "\n已清理临时文档" : "\n⚠️ 临时文档未能清理: " + docId);
+    } else if (docId) {
+        console.log("\nMM_KEEP=1，保留文档:", docId);
+    }
 }

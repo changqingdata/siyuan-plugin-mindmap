@@ -81,7 +81,25 @@ try {
     show("还原后        ", r.back);
 
     const same = (a, b) => a.every((x, i) => x.w === b[i].w && x.h === b[i].h);
-    console.log("\nzoom=1 与 zoom=0.55 量测一致?", same(r.at1, r.at055) ? "一致 → zoom 不影响量测" : "不一致 → zoom 影响量测，布局会依赖渲染次序");
+    const consistent = same(r.at1, r.at055);
+    console.log("\nzoom=1 与 zoom=0.55 量测一致?", consistent ? "一致 → zoom 不影响量测" : "不一致 → zoom 影响量测，布局会依赖渲染次序");
+    /*
+     * ⚠️⚠️ 这一支**故意不设退出码** —— 它不是断言，是「回答一个问题」的探针。
+     *
+     * 它问的是「原生 `offsetWidth` 会不会被祖先的 zoom 影响」，答案是**会**
+     * （实测差 2px，正好对上 renderer.ts 里注释的「最多多出 1/zoom ≈ 1.8px」）。
+     * 这个「不一致」是**事实本身**，是 `render()` 里那段
+     * 「量测前先把 world 的 zoom 归 1」修复存在的**证据**，不是缺陷。
+     *
+     * 我一度给它加了 `process.exitCode = 1`，结果它立刻红了 —— 那不是发现了 bug，
+     * 是**把「记录一个事实」错当成「断言一个期望」**，造出一扇永远红的门。
+     *
+     * 判据：这段代码红了，说明「产品坏了」还是「我搞错了」？
+     *       前者才配当门，后者只配当诊断。
+     */
+    if (!consistent) {
+        console.log("  ↑ 这是预期结果，不是失败：原生量测确实对 zoom 敏感，renderer 已在量测前归 1。");
+    }
 } finally {
     await chrome.close();
     await removeDoc(api, docId);

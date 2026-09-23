@@ -178,6 +178,8 @@ try {
         const vr = vp.getBoundingClientRect();
         const els = [...root.querySelectorAll('.mm-node')].filter((e) => e.style.visibility !== 'hidden');
         if (!els.length) return null;
+        const world = root.querySelector('.mm-world');
+        const wr = world.getBoundingClientRect();
         const rs = els.map((e) => e.getBoundingClientRect());
         const u = rs.reduce((a, r) => ({
             l: Math.min(a.l, r.left), r: Math.max(a.r, r.right),
@@ -191,6 +193,10 @@ try {
             coverage: +(covered / vr.width).toFixed(3),
             leftSlack: Math.round(Math.max(left, 0)),
             rightSlack: Math.round(Math.max(vr.width - right, 0)),
+            // 画布本身（含内边距）与内容包围盒的差额 —— 取景钳制算的是画布，
+            // 断言量的是内容，两者不等时差额就是「被白白吃掉的空白」。
+            canvasW: Math.round(wr.width),
+            padLeft: Math.round(u.l - wr.left),
         };
     })()`);
     if (frame) {
@@ -198,7 +204,8 @@ try {
             check(
                 "可读优先取景不浪费可视区",
                 frame.coverage >= 0.9,
-                `内容 ${frame.contentW}px ≥ 视口 ${frame.vpW}px，覆盖率 ${(frame.coverage * 100).toFixed(1)}%（应 ≥90%）`,
+                `内容 ${frame.contentW}px ≥ 视口 ${frame.vpW}px，覆盖率 ${(frame.coverage * 100).toFixed(1)}%（应 ≥90%）` +
+                    `｜画布 ${frame.canvasW}px、左空 ${frame.leftSlack}px（其中画布内边距占 ${frame.padLeft}px）`,
             );
         } else {
             const skew = Math.abs(frame.leftSlack - frame.rightSlack);

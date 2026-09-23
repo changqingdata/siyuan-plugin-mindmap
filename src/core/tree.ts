@@ -5,8 +5,32 @@ import type { MMNode } from "../types";
  * 涉及块写入的逻辑见 actions.ts。
  */
 
-/** 新建节点时的默认文字 */
+// i18n-audit-ignore-start
+/**
+ * 新建节点时的默认文字。
+ *
+ * ⚠️ 这是**写进文档的内容**，不是界面文案 —— 它进的是用户的笔记，跟着文档走、
+ * 会被导出、会被全文搜索。界面语言变了不该改变写进别人笔记里的字，
+ * 所以它**不进 i18n**：笔记用什么语言由用户自己决定，不由界面语言决定。
+ */
 export const NEW_NODE_TEXT = "新节点";
+// i18n-audit-ignore-end
+
+/**
+ * 「真正看得见」的子节点。
+ *
+ * 两个理由会让一个子节点不出现，判据必须**只有这一处**：
+ *   - `folded`  —— 用户折叠了这个节点（持久状态，会写回内核）；
+ *   - `hidden`  —— 当前过滤器把它筛掉了（纯内存状态，见 MMNode.hidden 的注释）。
+ *
+ * 布局（`layout.ts` 的 `n.kids`）与键盘导航都走这个函数。
+ * 以前布局里直接写 `n.folded ? [] : n.children`，加了过滤器之后如果只改一处，
+ * 就会出现「布局里没有它、方向键却停在一张空白上」这种鬼打墙。
+ */
+export function shownChildren(n: MMNode): MMNode[] {
+    if (n.folded) return [];
+    return n.children.some((c) => c.hidden) ? n.children.filter((c) => !c.hidden) : n.children;
+}
 
 /** a 是否为 b 的祖先（不含自身） */
 export function isAncestor(a: MMNode, b: MMNode | null): boolean {

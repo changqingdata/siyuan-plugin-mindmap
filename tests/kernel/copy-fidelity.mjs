@@ -15,6 +15,7 @@
  * 用法：node tests/kernel/copy-fidelity.mjs
  */
 import fs from "node:fs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const KERNEL = process.env.SIYUAN_KERNEL || "http://127.0.0.1:6806";
 const WORKSPACE = process.env.SIYUAN_WORKSPACE || "D:\\常青Data";
@@ -231,10 +232,12 @@ console.log("\n基准对照: 源列表项（甲） " + fmt(srcFeatures));
 
 /* ------------------------------------------------------------------ 清理 */
 
-const info = await api("/api/block/getBlockInfo", { id: docId });
-if (info.code === 0) {
-    await api("/api/filetree/removeDoc", { notebook: info.data.box, path: info.data.path });
-    console.log("\n已清理临时文档");
-} else {
-    console.log("\n⚠️ 未能清理临时文档:", docId);
-}
+/* ⚠️ 本支是探针（顶层 await，没有 try/finally 包住主逻辑）—— 中途抛异常会跳过这里，
+   在用户笔记本里留下「临时-副本保真-时间戳」。没做结构改造（探针跑得少、
+   收益低于改动风险），但两点必须做到：
+     1. 清理走 _doc-cleanup 的两步法（getPathByID → removeDoc）——
+        原来用 getBlockInfo 取 box/path 是另一条路径，字段名不保证一致；
+     2. 失败要**出声**，不能静默吞掉。
+   万一真漏了，用 `npm run clean:tmp` 扫掉（按「临时-」+ 签名匹配）。 */
+const cleaned = await removeDoc(api, docId);
+console.log(cleaned ? "\n已清理临时文档" : "\n⚠️ 未能清理临时文档: " + docId);

@@ -133,6 +133,24 @@ class Page {
         return this.conn.send(method, params, this.sid);
     }
 
+    /**
+     * 订阅事件，自动按本页的 sessionId 过滤。
+     *
+     * 直接 `page.conn.on(...)` 会收到**所有** target 的事件（chrome 自己的
+     * about:blank 标签、后续 newPage 出来的页都会混进来），排查时噪音很大。
+     *
+     * 用途：抓 `Runtime.consoleAPICalled` —— 插件里所有「写内核失败」的分支
+     * 都只留一句 `console.warn("[mindmap] …")`，不抓的话，一次「点了没反应」
+     * 只能看到「内核没变」，看不出是没点到、动作没派发、还是内核拒绝了。
+     * 需要先 `await page.send("Runtime.enable")`。
+     */
+    on(method, fn) {
+        this.conn.on(method, (params, sid) => {
+            // sid 为 undefined 说明是浏览器级事件，一并放行
+            if (sid === undefined || sid === this.sid) fn(params);
+        });
+    }
+
     /** 求值；awaitPromise 时表达式应返回 Promise */
     async eval(expression, awaitPromise = false) {
         const r = await this.send("Runtime.evaluate", {
@@ -286,7 +304,14 @@ export async function launch({ port = 9333, headless = true, gpu = false, width 
     else args.push("--disable-gpu");
     args.push("about:blank");
 
-    const proc = spawn(exe, args, { stdio: "ignore", windowsHide: true });
+    // ⚠️ stderr 要接住。原来写的是 `stdio: "ignore"` —— 于是「端口未就绪」这句
+    // 什么都不说明：Chrome 是没起来？崩了？还是参数不认？全看不到。
+    // 实测踩过：连着两次「端口未就绪」，因为没有 stderr，只能靠猜。
+    const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+    let chromeErr = "";
+    proc.stderr?.on("data", (b) => {
+        chromeErr = (chromeErr + b.toString()).slice(-1500);
+    });
 
     // 等 DevTools 端口起来
     let version = null;
@@ -301,7 +326,10 @@ export async function launch({ port = 9333, headless = true, gpu = false, width 
     }
     if (!version) {
         proc.kill();
-        throw new Error("Chrome DevTools 端口未就绪");
+        throw new Error(
+            `Chrome DevTools 端口未就绪（${port}）` +
+                (chromeErr ? `\n--- Chrome stderr ---\n${chromeErr.trim()}` : "\n（Chrome 没有输出任何 stderr）"),
+        );
     }
 
     const ws = new WebSocket(version.webSocketDebuggerUrl);

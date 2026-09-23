@@ -10,6 +10,9 @@ import { layout } from "../src/core/layout";
 import { buildConnectors } from "../src/core/edge";
 import { mixHex } from "../src/core/theme";
 import { decodeViewPrefs, encodeViewPrefs } from "../src/core/prefs";
+import { ATTR_MARK, decodeMark, encodeMark, hasMark, sameMark } from "../src/core/marks";
+import { clearNotes, formatNotes, installDiagnostics, recentNotes, stamp } from "../src/core/diagnostics";
+import { readableHotkey } from "../src/utils/hotkey";
 import {
     canDelete,
     canEdit,
@@ -35,12 +38,24 @@ const g = globalThis as any;
 let passed = 0;
 const failures: string[] = [];
 
-function ok(cond: boolean, msg: string) {
+/**
+ * ⚠️ 第三个参数是**诊断信息**，不是可有可无的装饰。
+ *
+ * 早先这个签名只有两个参数，而调用点有 9 处传了第三个 —— 多出来的实际值
+ * 被 JavaScript 静默丢掉，于是断言红的时候只看到一句「对象参数走 JSON」，
+ * 看不到真实内容是什么，还得回去改代码才能查。
+ * 这正是「断言消息要自带诊断」那条教训：消息里没有数字，红的时候等于没红。
+ *
+ * 之所以一直没暴露，是因为 `tsconfig.json` 的 include 只有 `src/**`，
+ * 本文件根本不在类型检查范围内（现已由 `tsconfig.tests.json` 覆盖）。
+ */
+function ok(cond: boolean, msg: string, detail?: unknown) {
     if (cond) {
         passed++;
     } else {
-        failures.push(msg);
-        console.error(`  ✗ ${msg}`);
+        const line = detail === undefined ? msg : `${msg} —— ${String(detail)}`;
+        failures.push(line);
+        console.error(`  ✗ ${line}`);
     }
 }
 
@@ -59,6 +74,8 @@ type Spec = {
     subtype?: string;
     html?: string;
     text?: string;
+    /** 额外属性 —— 块的自定义属性（`custom-*`）在思源里就是块元素上的属性 */
+    attrs?: Record<string, string>;
     children?: Spec[];
 };
 
@@ -67,6 +84,7 @@ function el(spec: Spec): any {
     if (spec.id) node.dataset.nodeId = spec.id;
     if (spec.subtype) node.dataset.subtype = spec.subtype;
     for (const c of spec.cls ?? []) node.classList.add(c);
+    for (const [k, v] of Object.entries(spec.attrs ?? {})) node.setAttribute(k, v);
     node.innerHTML = spec.html ?? "";
     node.textContent = spec.text ?? "";
     for (const child of spec.children ?? []) node.appendChild(el(child));
@@ -82,9 +100,10 @@ const p = (id: string, text: string, html?: string): Spec => ({
 });
 
 /** 列表项 */
-const li = (id: string, content: Spec, sub?: Spec, cls: string[] = []): Spec => ({
+const li = (id: string, content: Spec, sub?: Spec, cls: string[] = [], attrs?: Record<string, string>): Spec => ({
     id,
     cls: ["li", ...cls],
+    attrs,
     children: sub ? [content, sub] : [content],
 });
 
@@ -698,6 +717,172 @@ console.log("[10] 批量操作（选中项整理）");
     eq(topLevelOf([r.children[0], r.children[1]]).length, 2, "互不包含的选中项都保留");
     eq(topLevelOf([]).length, 0, "空选择返回空");
     eq(topLevelOf([b]).length, 1, "只选了子节点时原样保留");
+}
+
+/* ------------------------------------------------------------ 11. 节点标记（P1-2） */
+
+console.log("[11] 节点标记的编解码与解析");
+{
+    /* ---- 编解码 ---- */
+    eq(encodeMark(null), null, "空标记编码成 null（写回时表示删掉属性，而不是写空串）");
+    eq(encodeMark({}), null, "全是空字段也当作没有标记");
+    eq(decodeMark(null), undefined, "没有属性 → 没有标记");
+    eq(decodeMark(""), undefined, "空属性 → 没有标记");
+    eq(decodeMark("   "), undefined, "全空白属性 → 没有标记");
+
+    // 手写属性的场景：属性值直接就是图标，最省事
+    eq(decodeMark("⭐")?.icon, "⭐", "裸字符串按图标解析（用户手写属性也能用）");
+    eq(decodeMark("{坏 JSON"), undefined, "以 { 开头但解析不了 → 当作没有标记，不抛异常");
+    eq(decodeMark("null"), undefined, "JSON null → 没有标记");
+    eq(decodeMark('"字符串"'), undefined, "JSON 字符串 → 没有标记");
+    eq(decodeMark("[1,2]"), undefined, "JSON 数组 → 没有标记");
+
+    /* ---- 往返 ---- */
+    const full = { icon: "⭐", label: "重要", color: "#e5534b" };
+    const back = decodeMark(encodeMark(full));
+    eq(back?.icon, "⭐", "往返保住图标");
+    eq(back?.label, "重要", "往返保住标签");
+    eq(back?.color, "#e5534b", "往返保住颜色");
+
+    /* ---- 越界与脏值 ---- */
+    eq(decodeMark('{"label":"一二三四五六七八九十"}')?.label, "一二三四五六七八", "标签超长截断到 8 个字");
+    eq(decodeMark('{"color":"red"}'), undefined, "非法颜色被丢弃（只剩空标记 = 没有标记）");
+    eq(decodeMark('{"color":"#GGG"}'), undefined, "非十六进制颜色被丢弃");
+    eq(decodeMark('{"icon":123}'), undefined, "图标不是字符串 → 丢弃");
+    eq(hasMark({ color: "#fff" }), true, "只有颜色也算有标记");
+    eq(hasMark({}), false, "空对象不算标记");
+
+    /* ---- 变更判定（避免白写一次内核 + 白记一条撤销） ---- */
+    eq(sameMark(undefined, undefined), true, "都没标记 → 相同");
+    eq(sameMark(undefined, {}), true, "没有标记 vs 空标记 → 相同");
+    eq(sameMark({ icon: "⭐" }, { icon: "⭐" }), true, "同一套标记 → 相同");
+    eq(sameMark({ icon: "⭐" }, { icon: "🔥" }), false, "换了图标 → 不同");
+    eq(sameMark({ icon: "⭐" }, { icon: "⭐", color: "#e5534b" }), false, "多了一个颜色 → 不同");
+
+    /* ---- 解析层：从块属性读出来 ---- */
+    const marked = list("u", "LM", [
+        li("M1", p("MP1", "带标记"), undefined, [], { [ATTR_MARK]: '{"icon":"⭐","label":"重要"}' }),
+        li("M2", p("MP2", "没标记")),
+        li("M3", p("MP3", "坏属性"), undefined, [], { [ATTR_MARK]: "{坏" }),
+    ]);
+    const nodes = parseList(el(marked));
+    eq(nodes[0].mark?.icon, "⭐", "parseList 从块属性读出图标");
+    eq(nodes[0].mark?.label, "重要", "parseList 从块属性读出标签");
+    eq(nodes[1].mark, undefined, "没有属性的节点没有标记");
+    eq(nodes[2].mark, undefined, "属性坏掉的节点按「没有标记」处理，不影响其它节点");
+
+    // 标记不进文字：它不参与改名 / 复制 / 导出，只在渲染时挂上去
+    eq(nodes[0].text, "带标记", "标记不会混进节点文字");
+}
+
+/* ------------------------------------------------------ 12. 诊断信息收集（P1-5） */
+
+console.log("[12] 诊断信息的收集与格式化");
+{
+    /* 先把 console 换成探针，再装诊断 —— 顺序不能反：
+       诊断模块在安装那一刻就把「当时的 console」抓成原函数，
+       想验证「原日志有没有被吞掉」，探针必须站在这条链的下游。 */
+    const realWarn = console.warn;
+    const realErr = console.error;
+    const forwarded: string[] = [];
+    console.warn = (...a: unknown[]) => {
+        forwarded.push(a.map(String).join(" "));
+    };
+    console.error = (...a: unknown[]) => {
+        forwarded.push(a.map(String).join(" "));
+    };
+
+    installDiagnostics();
+    clearNotes();
+
+    /* ---- 收什么：只收 [mindmap] 的 ---- */
+    console.warn("[mindmap] 甲：写内核失败");
+    eq(recentNotes().length, 1, "带 [mindmap] 的警告被记下来了");
+    eq(forwarded.length, 1, "原日志照常往下传（没有被「记录」吞掉）");
+    eq(forwarded[0], "[mindmap] 甲：写内核失败", "传下去的还是原文");
+
+    console.warn("这是思源本体或别的插件写的，不该收");
+    eq(recentNotes().length, 1, "不带 [mindmap] 的日志不会挤进来");
+    eq(forwarded.length, 2, "但它在控制台里照旧可见");
+
+    console.error("[mindmap] 乙：内核拒绝了");
+    eq(recentNotes().length, 2, "error 也收");
+    eq(recentNotes()[1].level, "error", "级别记对了");
+
+    /* ---- 参数怎么压成一行 ---- */
+    console.warn("[mindmap] 丙", { a: 1 }, new Error("炸了"));
+    const note = recentNotes()[2].text;
+    ok(note.includes('{"a":1}'), "对象参数走 JSON", note);
+    ok(note.includes("Error: 炸了"), "异常参数带上 message", note);
+    ok(!note.includes("\n"), "压成了一行（诊断信息是给人看的，多行会散架）");
+
+    /* ---- 环形上限 ---- */
+    clearNotes();
+    for (let i = 0; i < 30; i++) console.warn(`[mindmap] 第 ${i} 条`);
+    eq(recentNotes().length, 24, "最多留 24 条（排障看的是最近发生了什么，不是完整日志）");
+    eq(recentNotes()[0].text, "[mindmap] 第 6 条", "挤掉的是最老的，留下的是最近的");
+    eq(recentNotes()[23].text, "[mindmap] 第 29 条", "最后一条在");
+
+    /* ---- 格式化 ---- */
+    const fmt = formatNotes();
+    ok(/^\s+\d{2}:\d{2}:\d{2} \[warn\] \[mindmap\] 第 6 条/.test(fmt), "每条前面挂上时间与级别", fmt.split("\n")[0]);
+    eq(fmt.split("\n").length, 24, "一行一条");
+
+    clearNotes();
+    eq(formatNotes(), "（本次会话没有 [mindmap] 警告或错误）", "没有记录时说清楚「没有」，而不是留一片空白");
+
+    /* ---- 抬头时间戳 ---- */
+    const fixed = new Date(2026, 8, 19, 10, 4, 9).getTime();
+    eq(stamp(fixed), "2026-09-19 10:04:09", "时间戳补零到秒（一眼能看出是哪一次会话）");
+    eq(stamp(new Date(2026, 0, 2, 3, 4, 5).getTime()), "2026-01-02 03:04:05", "个位数月份 / 日期也补零");
+
+    /* ---- 幂等 ---- */
+    installDiagnostics();
+    clearNotes();
+    console.warn("[mindmap] 丁");
+    eq(recentNotes().length, 1, "重复安装只生效一次（热重载不会套娃记两遍）");
+
+    console.warn = realWarn;
+    console.error = realErr;
+}
+
+/* ------------------------------------------------- 13. 键位换算（跨平台显示） */
+{
+    console.log("\n[13] 键位换算：思源表示法 → 平台可读写法");
+    // 起因：快捷键速查里写死了 `⌥⌘D`，而本机是 Windows —— 用户在自己
+    //「设置 → 快捷键」里看到的是 `Ctrl+Alt+D`（实测：思源主菜单里「魔法排版」
+    // 显示 `Ctrl+Alt+P`，其 keymap 存值正是 `⌥⌘P`）。两套符号对不上。
+
+    /* ---- macOS：原样保留思源表示法 ---- */
+    eq(readableHotkey("⌥⌘D", true), "⌥⌘D", "macOS 上原样保留（思源自己的表示法就是这个）");
+    eq(readableHotkey("⌘Z", true), "⌘Z", "macOS 上单修饰键也不动");
+
+    /* ---- Windows / Linux：换算成 Ctrl / Alt / Shift ---- */
+    eq(readableHotkey("⌥⌘D", false), "Ctrl+Alt+D", "★ Windows 上 ⌥⌘D → Ctrl+Alt+D（与思源菜单的写法一致）");
+    eq(readableHotkey("⌥⌘V", false), "Ctrl+Alt+V", "★ 另一条同理");
+    eq(readableHotkey("⌘Z", false), "Ctrl+Z", "单 ⌘ → Ctrl");
+    eq(readableHotkey("⌥P", false), "Alt+P", "单 ⌥ → Alt（思源菜单里「设置」就是这么显示的）");
+
+    /* ---- 顺序：Ctrl → Shift → Alt → 主键（照抄思源的规范顺序） ---- */
+    // 顺序排错不会崩，但会造出第二套写法 —— 用户在思源设置页看到
+    // `Shift+Alt+P`，插件里写着 `Alt+Shift+P`，等于又对不上。
+    // 下面三条是从思源**实测显示**反推出来的：
+    //   `⌥⌘P` → `Ctrl+Alt+P`    ⇒ Ctrl 在 Alt 前
+    //   `⇧⌘F` → `Ctrl+Shift+F`  ⇒ Ctrl 在 Shift 前
+    //   `⌥⇧P` → `Shift+Alt+P`   ⇒ Shift 在 Alt 前
+    eq(readableHotkey("⌥⌘P", false), "Ctrl+Alt+P", "★ 顺序 Ctrl 在 Alt 前（对齐思源菜单里的「魔法排版 Ctrl+Alt+P」）");
+    eq(readableHotkey("⇧⌘F", false), "Ctrl+Shift+F", "★ 顺序 Ctrl 在 Shift 前（对齐思源「固定搜索 Ctrl+Shift+F」）");
+    eq(readableHotkey("⌥⇧P", false), "Shift+Alt+P", "★★ 顺序 Shift 在 Alt 前（对齐思源「命令面板 Shift+Alt+P」）");
+    eq(readableHotkey("⌥⇧↓", false), "Shift+Alt+↓", "带方向键主键的组合同样成立");
+
+    /* ---- 主键不被吞掉 ---- */
+    eq(readableHotkey("F2", false), "F2", "没有修饰键时原样返回（不能被换算吃掉）");
+    eq(readableHotkey("⌘\\", false), "Ctrl+\\", "反斜杠这类主键也要留下来");
+    eq(readableHotkey("", false), "", "空串返回空串（迁移命令故意不绑键，不能变成 Ctrl+）");
+
+    /* ---- 幂等：换算过的串再换算不该变样 ---- */
+    // 防的是「已经显示成 Ctrl+Alt+D 了又被换算一遍」这类重复加工。
+    eq(readableHotkey(readableHotkey("⌥⌘D", false), false), "Ctrl+Alt+D", "换算过的串再算一次结果不变");
 }
 
 /* ------------------------------------------------------------------ 汇总 */

@@ -4,6 +4,7 @@
  * 只看结果树，不做断言。
  */
 import fs from "node:fs";
+import { removeDoc } from "./_doc-cleanup.mjs";
 
 const c = JSON.parse(fs.readFileSync("D:/常青Data/conf/conf.json", "utf8"));
 const T = c.api.token;
@@ -50,8 +51,9 @@ async function fresh(tag) {
 }
 
 async function cleanup(docId) {
-    const info = await api("/api/block/getBlockInfo", { id: docId });
-    await api("/api/filetree/removeDoc", { notebook: info.data.box, path: info.data.path });
+    /* 走 _doc-cleanup 的两步法（getPathByID → removeDoc）。
+       原先用 getBlockInfo 取 box/path —— 那是另一条路径，字段名也不保证一致。 */
+    if (!(await removeDoc(api, docId))) console.warn("  ⚠️ 清理失败:", docId);
 }
 
 const cases = [
@@ -68,14 +70,20 @@ const cases = [
 
 for (const [name, mk] of cases) {
     const s = await fresh(name[0]);
-    const payload = mk(s);
-    const res = await api("/api/block/insertBlock", { dataType: "markdown", ...payload });
-    const out = [];
-    await dump(s.listId, 0, out);
-    const short = JSON.stringify(payload).replace(/"([a-z0-9-]{18,})"/g, (m, g) => '"…' + g.slice(-7) + '"');
-    console.log("\n### " + name);
-    console.log("   请求: " + short);
-    console.log("   code=" + res.code + (res.code !== 0 ? " " + res.msg : ""));
-    console.log(out.map((l) => "   " + l).join("\n"));
-    await cleanup(s.docId);
+    /* ⚠️ 清理放 finally：原先写在循环体末尾，中途任何一步抛异常
+       （内核拒绝、dump 出错）就会跳过清理，
+       在用户笔记本里留下「临时-插入矩阵-x-时间戳」。 */
+    try {
+        const payload = mk(s);
+        const res = await api("/api/block/insertBlock", { dataType: "markdown", ...payload });
+        const out = [];
+        await dump(s.listId, 0, out);
+        const short = JSON.stringify(payload).replace(/"([a-z0-9-]{18,})"/g, (m, g) => '"…' + g.slice(-7) + '"');
+        console.log("\n### " + name);
+        console.log("   请求: " + short);
+        console.log("   code=" + res.code + (res.code !== 0 ? " " + res.msg : ""));
+        console.log(out.map((l) => "   " + l).join("\n"));
+    } finally {
+        await cleanup(s.docId);
+    }
 }
