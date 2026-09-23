@@ -1,183 +1,422 @@
-# Outline Mind Map
+# 大纲导图 · Outline Mind Map
 
-Turn **unordered lists, ordered lists and task lists** in SiYuan into professional-looking mind maps with a single click.
+> English version: [README_en_US.md](README_en_US.md)
 
-## Why
+把思源笔记里的**无序列表、有序列表、任务列表**三种大纲块，一键渲染成专业级思维导图。
 
-An outline is already a tree — it just doesn't look like one once it gets deep. This plugin renders outline blocks as a real diagram:
+## 为什么用它
 
-- **Card-style nodes** — a filled pill for the root, tinted cards for first-level branches, and cards with a coloured spine below that
-- **Per-branch colour schemes** inherited down the hierarchy
-- **Bézier connectors** whose width and opacity taper with depth
-- **A real layout engine** — tidy-tree packing with parents centred over their children, so long text can't skew the whole map
-- **Three structures** — logic chart, mind map (split left/right) and tree chart (top-down)
-- **Follows the SiYuan theme** by default, plus five built-in palettes: Deep Space, Paper, Morandi, Neon and High Contrast
-- **Zoom, pan and fold** — Ctrl + wheel to zoom, drag to pan, one click to fit, collapse any subtree
-- **Full keyboard control** — arrow keys navigate, `Tab` / `Enter` / `F2` / `Delete` restructure without going back to the editor
-- **Edit in place** — double-click a node to rename it; Enter commits and writes straight back to SiYuan
-- **Drag to restructure** — drag a node to change its order or level; right-click for insert / move / indent / outdent / delete
-- **Tick tasks off in the map** — click a `- [ ]` checkbox (or press `X`) and the marker is written back to the outline
-- **Search and multi-select** — `Ctrl + F` to find a node (scope can be switched to the **whole document**), `Shift`-drag to box-select, then act on the whole selection at once
-- **Filter by status** — in a task list, show only unfinished or only finished items; non-task nodes stay or go with their nearest task ancestor
-- **Node marks** — attach an icon, a short label or a custom colour to a node; stored in a block attribute so it syncs with your notes
-- **Minimap and zoom capsule** — always know where you are in a big map
-- **Built for long documents** — blocks render only as they approach the viewport, and oversized maps are guarded
-- **Export to SVG / PNG**, or just the selected subtree
+思源的大纲天然就是一棵树，但纯文本的层级在层级变深后会很难一眼看清结构。这个插件把大纲块变成真正的导图：
 
-## Usage
+- **卡片式节点** —— 根节点实心胶囊、一级分支浅色填充卡、深层节点带左侧色条，而不是白框黑字
+- **分支色系** —— 每个一级分支一种颜色，子节点沿层级继承，一眼分清归属
+- **贝塞尔曲线连线** —— 线宽与透明度随层级递减，形成视觉纵深
+- **真正的布局引擎** —— tidy-tree 算法，左右自动平衡、父节点对齐子树中点，长文本不会撑歪整张图
+- **四种布局** —— 逻辑结构图、思维导图（左右分布）、树状图（自上而下）
+- **跟随思源主题** —— 默认使用思源当前配色，也可切换到内置的深空 / 极简白 / 莫兰迪 / 霓虹 / 高对比度
+- **可缩放可折叠** —— Ctrl + 滚轮缩放、拖拽平移、一键适应画布、折叠任意子树
+- **全键盘操作** —— 方向键在节点间导航，`Tab` / `Enter` / `F2` / `Delete` 直接改结构，不用回到编辑器
+- **图内直接编辑** —— 双击节点改名，回车提交，改动直接写回思源
+- **拖拽重排** —— 拖动节点即可调整顺序与层级，右键还有增删 / 升降级 / 定位等操作
+- **搜索与多选** —— `Ctrl + F` 定位节点，搜索范围还能切到**全文档**；`Shift` 框选或 `Ctrl + A` 批量选中后统一操作
+- **状态过滤** —— 任务列表里一键「只看未完成 / 只看已完成」，非待办节点跟着最近的任务祖先一起留或走
+- **节点标记** —— 给节点挂图标 / 标签 / 自定义色，存在块属性上，可随笔记同步
+- **小地图与缩放胶囊** —— 大图里也能随时知道自己在哪
+- **长文档友好** —— 列表块进入视口才渲染，节点过多时自动收紧间距并给出保护提示
+- **导出 SVG / PNG** —— 矢量输出，方便分享与插入文档
 
-1. Open the block menu on any list block
-2. Choose **Plugin → Outline Mind Map → Logic chart** (or Mind map / Tree chart)
-3. The list turns into a mind map; pick **Outline view** to switch back at any time
+## 使用
 
-You can also run **Toggle the list at the cursor between mind map and outline** from the command palette (`Ctrl + P`),
-or **Open the current list's mind map in the side panel** to view the map next to the outline.
+1. 在任意列表块（无序 / 有序 / 任务列表）上点击块标打开块菜单
+2. 选择 **插件 → 大纲导图 → 逻辑结构图**（或思维导图 / 树状图）
+3. 该列表块立即变成导图；选 **大纲视图** 可随时切回
 
-Three entry points are available:
+导图右上角的工具条提供：
 
-| Entry | Where | What it does |
+| 按钮 | 作用 |
+| --- | --- |
+| 逻辑结构图 / 思维导图 / 树状图 | 切换布局，会写回块属性 |
+| 全部 / 未完成 / 已完成 | 按状态过滤（仅任务列表出现；只影响当前这张图，不改内容） |
+| − / + / 适应 | 缩放与一键适应画布 |
+| 折叠 / 展开 | 批量折叠或展开所有子树 |
+| 导出 | 导出 PNG 或 SVG |
+| 全屏 | 在独立窗口中查看大导图 |
+| 退出 | 关闭导图，恢复大纲视图 |
+
+### 三种入口
+
+除了列表块菜单，导图还可以从这些地方打开：
+
+| 入口 | 位置 | 说明 |
 | --- | --- | --- |
-| Block menu | list block icon → Plugin → Outline Mind Map | Converts that one list |
-| Top bar icon | the tree icon on the right of the top toolbar | Convert the current list, open side-by-side, convert every list in the document, open settings |
-| Command panel | `Alt + Shift + P`, then search "mind map" | Both commands live here, with proper labels |
-| Shortcuts | `Alt + Cmd + D` toggles map / outline, `Alt + Cmd + V` opens the side panel | Rebindable in SiYuan's shortcut settings |
+| 块菜单 | 列表块标 → 插件 → 大纲导图 | 对单个列表生效 |
+| 顶栏图标 | 顶部工具栏右侧的树形图标 | 当前列表转换、并排查看、本页列表批量转换、打开设置 |
+| 命令面板 | `⌥⇧P`，搜「导图」 | 两条命令都在这里，显示中文 |
+| 快捷键 | `⌥⌘D` 切换导图 / 大纲，`⌥⌘V` 并排打开 | 可在思源「设置 → 快捷键」里改键 |
 
-Keys the map deliberately **never** steals: `Ctrl + S` / `P` / `W` / `R`, `Ctrl + Z` / `Y` (undo is left
-to SiYuan's own stack), `F5` / `F11` / `F12`, and **anything with `⌥` (Alt) held** — that namespace is
-shared with SiYuan and other plugins, and this plugin's own `Alt + Cmd + D` / `Alt + Cmd + V` live in it.
+### 交互
 
-The toolbar on the map offers layout switching, status filters, zoom controls, fit-to-canvas, fold/expand all, export, fullscreen and exit.
+- **Ctrl + 滚轮**（macOS 为 ⌘）缩放
+- **拖拽空白处** 平移画布
+- **单击节点** 选中并聚焦该分支（祖先路径高亮，其余节点淡出）
+- **双击节点** 直接改文字 —— 回车提交、Esc 取消，改动写回思源
+- **拖动节点** 调整位置与层级：落在目标的上 / 下缘成为同级，落在中间成为其子节点
+- **右键节点** 打开操作菜单
+- **悬停节点** 出现 `+`（加子节点）与 `▾`（折叠）快捷按钮，不用再走右键
+- **Shift + 拖拽空白处** 框选多个节点
+- **点击节点侧边圆点** 折叠 / 展开子树，状态会记住
+- **多选 ≥2 个节点** 时，画布左上角浮出**批量操作条**：升级 / 降级 / 折叠 / 展开 / 导出这些 / 删除。
+  批量操作**要么全部成功、要么整体回滚**，中途失败会退回操作前的快照
+- **悬停折叠的节点** 600ms 后浮出**预览卡片**，列出它前几个子节点 —— 不用展开就知道里面有什么
+- **已完成的待办**（`- [x]`）通往父节点的连线是**虚线**，一眼看出这条支线已经做完了
+- **Ctrl / ⌘ + 双击节点** 下钻，只看这一支；面包屑可以逐级返回
+- **拖动节点** 到折叠的节点上停留一会儿，会**自动展开**它（圆环进度提示还剩多久）
+- **`Ctrl + F` 搜索** 默认只搜当前这张图；把搜索框上的范围开关切到**全文档**，
+  会列出本文档里所有导图中的命中（标注了来自哪张图），点一条直接跳过去
+- **点工具条上的状态 chip** 只看未完成 / 已完成。命中节点连同**它的祖先**一起留下 ——
+  一个没做完的子任务总得挂在它那个（可能已完成的）父任务下面，否则看不出它为什么在这儿
+- **右键 →「添加标记」** 给节点挂图标 / 标签 / 自定义色，用来标重点、分类或做视觉分组
 
-### Interactions
+### 结构操作的反馈
 
-- **Ctrl + wheel** (⌘ on macOS) to zoom
-- **Drag empty space** to pan
-- **Click a node** to select and focus that branch
-- **Double-click a node** to edit its text — Enter commits, Esc cancels
-- **Ctrl / ⌘ + double-click a node** to drill down into that branch; the breadcrumb walks back out
-- **Drag a node** onto another to restructure: drop on the upper / lower edge to become a sibling, drop in the middle to become a child
-- **Right-click a node** for the action menu
-- **Hover a node** for the `+` (add child) and `▾` (fold) shortcuts
-- **Click the dot beside a node** to fold or unfold its subtree
-- **Click a task checkbox** to toggle it; `X` toggles the selected node
-- **Select two or more nodes** and a **batch bar** appears: outdent / indent / fold / unfold / mark done / mark undone / export these / delete.
-  Batch operations are **all-or-nothing** — a mid-way failure rolls back to the snapshot taken before the operation
-- **Hover a folded node** for 600 ms and a preview card lists its first few children
-- **`Ctrl + F`** searches the current map by default; flip the scope switch on the search box to **whole document**
-  to list hits from every map in the file (each row says which map it came from) and jump straight to one
-- **Click a status chip** on the toolbar to show only unfinished or only finished tasks. A hit keeps **all of its
-  ancestors** — an unfinished sub-task has to stay under its (possibly finished) parent, or you can't tell why it's there
-- **Right-click → Add mark** to attach an icon, label or custom colour — handy for flagging or visually grouping nodes
+改结构要等「写内核 → 内核回推 → 重新挂载」一整圈，中间几百毫秒画面本来毫无变化。
+现在这段空窗有反馈了：
 
-> Renaming and inserting only touch the blocks involved, so **block IDs are preserved** and block references keep working.
-> Only when a drop position cannot be expressed by the kernel API (e.g. inserting at the very top of a list, or a target
-> that has no child list yet) does the plugin fall back to "insert a copy + delete the original", which rebuilds the IDs
-> of the moved subtree.
+- 加子节点时先放一个**虚线占位框**，拿到结果再换成真节点
+- 失败时在**源节点上打一圈红边并抖动**，同时说清原因，不是只弹一句「操作未生效」
+- 新插入的节点带一圈由亮转灭的**高亮描边**，回答「加在哪了」
+- 折叠时子节点**朝父节点聚拢并淡出**，而不是「啪一下没了」
+- 小地图上标出**当前选中的节点**（主色点）与**搜索命中**（暖色点）
 
-## Data model
+### 演示模式
 
-The map is **a view, not data** — blocks remain the single source of truth. The marker is stored in the block attribute `custom-mindmap`.
+工具条上的 ▶ 进入演示模式：整张图折到只剩根，然后随着方向键**逐层展开**，
+观众跟着讲述的节奏看到结构一层层长出来。
 
-**Node marks are stored as a block attribute too** (`custom-mindmap-mark`, e.g. `{"icon":"⭐","label":"Important","color":"#e5534b"}`),
-so icons, labels and custom colours travel with your notes. They are **never mixed into the node text** — renaming,
-copying and exporting won't pick them up.
+演示是「换个视角看」，不是「改内容」 —— 全程**不写回大纲**，退出即恢复原状
+（有断言钉死这一点：演示全程 kramdown 一字未改）。
 
-**Fold state is not stored separately**: the plugin uses SiYuan's native list folding (the `fold` attribute on `.li`), so folding
-in the outline shows up in the map immediately and folding in the map is written back to the outline. It saves with the document.
+| 按键 | 作用 |
+| --- | --- |
+| `→` `↓` `空格` `PageDown` `Enter` | 下一个节点（必要时展开它的父级） |
+| `←` `↑` `PageUp` | 上一个节点 |
+| `Home` / `End` | 第一个 / 最后一个 |
+| `Esc` | 退出演示 |
 
-It coexists with the *Custom Block* plugin — the two use separate attribute namespaces. To migrate from it, use the "Migrate" button in settings or the command palette entry; only `custom-block-list-view = map` lists are converted.
+### 键盘操作
 
-## Settings
+单击任意节点后导图接管键盘（画布左上角会有一圈焦点环）。此时**方向键在节点间导航**，
+`Tab` / `Enter` 等直接改结构，不需要再回到编辑器。
 
-The settings panel covers the default layout, connector style, theme, numbering, branch colours, wheel behaviour,
-auto-fit, in-map keyboard control, lazy rendering, the minimap and per-document view preferences.
+| 按键 | 作用 |
+| --- | --- |
+| `↑` `↓` | 上一个 / 下一个同级节点 |
+| `←` | 回到父节点 |
+| `→` | 进入第一个子节点（折叠状态会先展开） |
+| `Home` `End` | 同级里的第一个 / 最后一个 |
+| `空格` | 折叠 / 展开当前节点 |
+| `Tab` | 插入子节点 |
+| `Shift + Tab` | 降级（成为上一个节点的子节点） |
+| `Alt + ←` / `Alt + →` | 降级 / 升级 |
+| `Enter` | 插入同级节点 |
+| `F2` | 改名 |
+| `Delete` / `Backspace` | 删除节点及其子树（有子节点时会先确认） |
+| `Ctrl + ↑` / `Ctrl + ↓` | 在同级内上移 / 下移 |
+| `Ctrl + A` | 全选同级；再按一次选中整棵树 |
+| `Ctrl + C` / `Ctrl + V` / `Ctrl + X` | 复制子树 / 粘贴为子节点 / 剪切 |
+| `Ctrl + D` | 快速复制（在节点之后插入一份含子树的副本） |
+| `Ctrl + =` / `Ctrl + -` | 放大 / 缩小 |
+| `Ctrl + 0` | 适应画布 |
+| `Ctrl + 1` | 回到 100% |
+| `Ctrl + F` | 搜索节点 |
+| `F` | 全屏（仅行内导图） |
+| `Esc` | 逐级退出：关搜索 → 清选中 → 移出导图 |
 
-It also has a **Copy diagnostics** button: it copies the plugin version, kernel version, a config snapshot, the state of
-every mounted map and the most recent plugin warnings to the clipboard, so you can paste it into a bug report.
-It only writes to the clipboard — **no network calls, no telemetry**.
+**焦点三态**：浏览态（键盘归思源）→ 选中态（键盘归导图）→ 编辑态（键盘归输入框）。
+进入改名输入框后，方向键、`Ctrl + C` / `Ctrl + V` 都交还给输入框，`Esc` 退出编辑。
 
-## Development
+**不会抢的键**：`Ctrl + S` / `P` / `W` / `R`、`Ctrl + Z` / `Y`（撤销重做交给思源自己的
+undo 栈）、`F5` / `F11` / `F12` 一律放行。**`⌥⌘` 开头的组合也一律放行** ——
+那是思源与其它插件共用的命名空间（本插件的「切换导图 / 大纲」`⌥⌘D`、「并排打开」`⌥⌘V`
+就在这一族里）。如果不希望导图接管键盘，可在设置里关掉「导图内快捷键」。
+
+节点右键菜单提供：
+
+| 菜单项 | 说明 |
+| --- | --- |
+| 编辑文字 | 等同双击 |
+| 插入子节点 / 在上方插入 / 在下方插入 | 新建节点并同步到思源 |
+| 上移 / 下移 | 在同级内调整顺序 |
+| 降级为上一个节点的子节点 | 相当于编辑器里的 Tab |
+| 升级为父节点的兄弟 | 相当于编辑器里的 Shift + Tab |
+| 折叠 / 展开子节点 | 仅当节点有子节点时出现 |
+| 添加标记 / 编辑标记 | 图标 / 标签 / 颜色，存块属性 |
+| 复制文字 | 复制节点纯文本 |
+| 定位到编辑器 | 退出导图并滚动定位到对应块 |
+| 删除节点 | 连同其子树一起删除 |
+
+> 改名与新建节点都只改动涉及的块，**块 ID 保持不变**，块引用与反链不受影响。
+> 仅当拖拽目标位置在内核 API 里无法表达时（例如插入到列表最前、或目标节点还没有子列表），
+> 才会改用「插入副本 + 删除原块」的方式，此时被移动的那棵子树会重建块 ID。
+
+## 设置
+
+插件设置面板中可以调整：
+
+- 默认布局、连线样式（曲线 / 直角折线 / 直线）、主题
+- 显示层级编号、分支配色、紧凑模式
+- 滚轮行为（`Ctrl + 滚轮缩放` / `滚轮平移导图`，两者都关时滚轮交给页面）
+- 自动适应画布、逻辑图自动分列
+- 双击编辑节点、拖拽调整节点
+- 懒渲染、导图内快捷键（关掉后方向键 / Tab 交还思源）、布局动效、小地图
+- 视图偏好跟文档走、悬停预览折叠节点、自定义一级分支配色
+- 紧凑模式阈值、渲染上限等数值项
+- 「查看快捷键」按钮 —— 弹出完整的按键速查表
+- 「复制诊断信息」按钮 —— 把版本、内核版本、配置快照、各视图状态与最近的插件警告
+  复制到剪贴板，方便贴给别人排障。**只复制到剪贴板，不联网、不上报**
+
+> 其中「视图偏好跟文档走」开启后，在某篇文档里改过布局 / 主题 / 连线 / 缩放，
+> 下次打开这篇文档还是它 —— 只记**显式改过**的项，没改过的继续跟随上面的全局默认
+> （否则改了全局设置所有文档都不跟着变）。
+>
+> 视图偏好存在列表块的 `custom-mindmap-view` 属性里（`layout=mind;scale=1.25` 这样的键值对），
+> 和「这个块是导图」的 `custom-mindmap` 分开存 —— 关掉导图标记时不会顺手把视图偏好也丢掉。
+> 编码用键值对而不是固定位置，以后加字段不用动老数据的解析。
+
+## 视觉
+
+- **四层节点层级**：中心主题（实心胶囊）→ 一级分支（分支色浅填充）→ 二级（中性卡片 + 左侧分支色条）→ 三级及以下（更轻）
+- **主干汇聚的连线**：父节点引出一条粗主干，沿"脊"分叉成细支线，越深的层级线越细
+- **六套主题**：跟随思源 / 深空 / 极简白 / 莫兰迪 / 霓虹 / 高对比度
+- 连线用**不透明混色**而非半透明色，重叠段不会叠深；点阵网格作为画布底纹
+- 右下角**缩放胶囊**（点开是菜单：100% / 适应画布 / 适应选中节点 / 只看当前分支 / 记住这个缩放）、
+  可点击跳转的**小地图**、增删节点时的**位移动效**
+- **大纲 ↔ 导图 双向高亮**：导图里选中的节点，在大纲里也会被标出来（并排查看时尤其明显）
+- 导出除了 PNG / SVG，还可以**只导出选中的子树**、**复制为图片到剪贴板**、**导出 Markdown 大纲**
+- **迁移**【自定义块样式】的列表导图标记
+
+## 数据与兼容
+
+- 导图**不是独立数据**，它是列表块的一种视图。所有内容始终以块为唯一数据源。
+- 标记写在块属性 `custom-mindmap` 上（值为布局名），可随笔记同步到其他设备。
+- **节点标记也存块属性**（`custom-mindmap-mark`，形如 `{"icon":"⭐","label":"重要","color":"#e5534b"}`），
+  所以图标 / 标签 / 自定义色同样随笔记走。它们**不参与节点文字** —— 改名、复制、导出都不会带上它。
+- **折叠状态不另存**：用的就是思源原生的列表折叠（`.li` 上的 `fold`），
+  所以在大纲里折叠会立刻反映到导图、在导图上折叠也会写回大纲，双向同步、随文档一起保存。
+- 与「自定义块样式」插件（`custom-block`）**可以共存**：两者使用不同的属性命名空间，互不干扰。
+- 想从该插件迁移过来，可在设置面板点击「开始迁移」，或运行命令「迁移【自定义块样式】的列表导图标记」。迁移只处理 `custom-block-list-view = map` 的列表块，表格 / 看板视图保持原样。
+
+## 开发
 
 ```bash
 npm install
-npm run dev        # watch mode
-npm run build      # one-off build
-npm run package    # build + package.zip
-npm run test       # parser / layout / tree-op unit tests
-npm run smoke      # packaged-bundle smoke test (build first)
-npm run visual     # headless-browser acceptance run (real rendering, real key events)
-npm run live       # live run against a real SiYuan kernel + web frontend
-npm run typecheck
-npm run check      # the whole pipeline in one go
-npm run check:all  # build + tests + browser acceptance
-npm run deploy     # build + sync into the SiYuan workspace
+npm run dev        # 监听重建
+npm run build      # 一次性构建
+npm run package    # 构建并产出 package.zip
+npm run test       # 解析 / 布局 / 连线几何 / 结构操作的单元测试
+npm run smoke      # 产物冒烟测试（需先 build）
+npm run visual     # 无头浏览器验收：真实渲染 + 真实键盘事件
+npm run live       # 真机验收：连真实思源内核 + 真实 Web 前端，点真按钮
+npm run live:gpu   # 真机 + 真实 GPU 合成（会短暂弹出一个浏览器窗口）
+npm run typecheck  # 类型检查
+npm run check      # 一键跑构建与测试（不含浏览器）
+npm run check:all  # 构建 + 测试 + 浏览器验收
+
+npm run deploy     # 构建 + 同步到思源工作空间（自动探测路径）
+npm run verify     # 确认思源是否已经加载了插件
+
+npm run ux:all     # 真机验收全家桶（15 支：交互 / 编辑 / 重开 / 折叠 / 过滤 / 标记 / 命令 / 设置项…）
+npm run ux:settings # 只跑设置面板 12 项「有实现、没断言」的验收（35 条断言）
+npm run audit:coverage # 静态覆盖审计：从源码枚举全部 UI 入口 × tests/ 命中，产出缺口清单
 ```
 
-Place this folder under `{workspace}/data/plugins/`; SiYuan loads `index.js` and `index.css` directly.
+`npm run visual` 值得单独说一句：Node 端的 DOM 模拟拿不到真实布局（`offsetWidth`
+全是桩值），所以「节点宽度有没有坍缩成一个字」「`Tab` 有没有漏给思源」「折叠按钮
+在高对比主题下是不是隐形」这类问题**只能在真实浏览器里验证**。它会把渲染结果量化成
+一份 JSON 报告并逐条断言，同时产出 `tests/.build/shot.png` 截图供肉眼确认。
+在地址栏 hash 上还能控制观察模式：`#hover` 强制显示悬停按钮、`#only=0&zoom=2`
+只留第 N 个视图并放大。
 
-## Maintainer notes
+`npm run live` 走的是另一条路：**真的连上正在运行的思源**。它用内核 API 建一篇临时文档、
+打上 `custom-mindmap` 标记，再开一个无头 Chrome 访问思源的 Web 前端
+（`http://127.0.0.1:6806/stage/build/desktop/?id=…`），用 CDP 派发**真实**鼠标与键盘事件，
+断言完自动删掉临时文档。之所以要这一层，是因为「思源自己的弹层焦点陷阱」「Protyle 抢焦点」
+「内核事务在前端怎么落地」这些宿主行为，在仿造页面里根本验不出来。
 
-### 1. Releasing is automated
+前提：思源在跑、`conf/conf.json` 里 `accessAuthCode` 为空、token 可读（脚本自己读）。
+想看现场就 `MM_KEEP=1 npm run live`，临时文档会保留下来。
 
-`.github/workflows/release.yml` runs on every push to `main`:
+`npm run audit:coverage` 是给「测试写全了吗」这个问题准备的：它把插件的**全部用户可见入口**
+从源码里枚举出来（命令 `addCommand({langKey})`、菜单 `label:`、设置面板
+`addToggle/addSelect/addNumber/addText/addItem({title})`、以及那份对用户公开的快捷键清单），
+再逐条对照 `tests/` 里有没有出现过，输出 `✓ / △ / ✗` 和一份零命中清单。
 
-1. `npm run check` — 8 static gates + 312 unit assertions + 96 package smoke assertions
-2. builds `package.zip` and verifies it contains the required files
-3. creates a GitHub Release tagged `v<version>` — **only if that release does not exist yet** (idempotent)
+它不看「有没有碰过这个模块」，只看「有没有碰过这个**入口**」—— 这个区别很实在：
+有一次它报出「连线样式」零覆盖，而实际上有 **4 支**脚本都在数 `.mm-edges path`，
+却**没有一支**验过「三种样式产出的是三种不同的线」。按模块算是测过的，按入口算是零覆盖。
+（脚本头写明了：静态 grep 只说明「这个字串没在测试里出现过」，**不等于**行为没被测，
+零命中清单是排查线索而不是结论。）
 
-**To ship a new version: bump `version` in `plugin.json` and push to `main`.** That is the whole process.
+### 装载到思源调试
 
-> ⚠️ Why a Release at all, and not just a push: **the bazaar pulls `package.zip` from the
-> Release, not the source in the repo.** This matters more here than in a typical plugin,
-> because `.gitignore` excludes the build artifacts (`index.js` / `index.css` / `i18n/`) —
-> so the repo source on its own is **not** a usable package.
+`npm run deploy` 会自动从 `~/.config/siyuan/workspace.json` 读出当前工作空间，把产物复制到
+`{工作空间}/data/plugins/siyuan-plugin-mindmap/`。也可以显式指定：
 
-### 2. Repository requirements (already satisfied — do not break them)
+```bash
+node scripts/deploy.mjs --workspace "D:\常青Data"
+node scripts/deploy.mjs --no-build     # 只同步，不重新构建
+```
 
-- **The repo name must match `plugin.json`'s `name` exactly** (`siyuan-plugin-mindmap`) —
-  the bazaar enforces uniqueness by `name`
-- **The default branch must be `main`** — the release workflow triggers on it
-- Release tags use the `v<version>` form (same style as the official `plugin-sample`)
-- `.gitignore` anchors root-level build artifacts with a leading `/`. Do **not** write a
-  bare `i18n/` or `index.css` there: it matches at **any** depth and would silently
-  exclude the real sources `src/i18n/*.json` and `src/styles/index.css`.
+同步完成后在思源里 **重载界面（Ctrl+Shift+R）或重启**，然后到
+**设置 → 集市 → 已下载** 找到「大纲导图」打开开关。
 
-### 3. About `minAppVersion` (this was wrong once — here is why it is what it is)
+`npm run verify` 会调用内核的 `/api/petal/loadPetals` 直接确认插件有没有被思源认到，
+排查「装了没反应」时比翻日志快。
 
-It is now **`3.6.4`**, and that is derived, not guessed: the plugin uses
-`/api/block/batchUpdateTaskListItemMarker` — the kernel API for **batch** task
-check/uncheck (select several nodes, toggle them all in one round trip). That
-kernel API was added by
-[PR #17461](https://github.com/siyuan-note/siyuan/pull/17461), milestone **3.6.4**.
-Below that version, batch check/uncheck fails.
+开发时把本目录放到 `{工作空间}/data/plugins/` 下，构建产物 `index.js` / `index.css` 会被思源直接加载。
 
-> ⚠️ Do not confuse it with `/api/block/updateTaskListItemMarker` — that is the
-> older **single-item** API used when you check off one task, and it imposes no
-> version floor. When setting `minAppVersion`, take the **highest** floor among
-> *all* kernel APIs the plugin uses, not the first one you happen to look at.
+### 目录结构
 
-> It used to say `3.1.0` — a value with **no basis at all**. Development and acceptance
-> were done entirely on **SiYuan 3.8.4** (all six empirical notes in the source say 3.8.4).
-> If you prefer to be more conservative, raise `minAppVersion` to `3.8.4`: that admits
-> only the tested version, at the cost of excluding older users.
+```
+src/
+├── index.ts              插件入口：生命周期、块菜单、命令、设置面板、全屏视图
+├── types.ts              公共类型与默认配置
+├── core/
+│   ├── parser.ts         Protyle DOM → MMNode 树
+│   ├── layout.ts         tidy-tree 布局引擎（深度轴 / 交叉轴抽象）
+│   ├── renderer.ts       MindMapView：DOM 构建、绘制、编辑、拖拽、缩放平移折叠
+│   ├── tree.ts           纯树操作：祖先判断、下标、markdown 序列化与转义
+│   ├── actions.ts        写回内核的结构操作：改名 / 增删 / 升降级 / 移动 / 勾选待办
+│   ├── history.ts        自建撤销栈（思源的 Ctrl+Z 管不到块 API 写出的内容）
+│   ├── prefs.ts          文档级视图偏好的编码 / 解码
+│   ├── theme.ts          主题 token 与解析
+│   ├── scanner.ts        变更侦测、懒渲染、幂等挂载、折叠状态持久化
+│   └── exporter.ts       SVG / PNG / Markdown 导出
+├── utils/api.ts          思源内核 API 薄封装
+├── styles/index.css      全部样式（只挂在 .mm-root 之下）
+└── i18n/*.json           多语言（键必须**扁平**，见下）
+```
 
-### 4. Already verified (no change needed)
+> 根目录的 `i18n/` 是**构建产物**（`build.mjs` 从 `src/i18n/` 复制生成），
+> 改文案要改 `src/i18n/*.json`。直接改根目录那份，下次构建会被原样覆盖回去。
+>
+> **i18n 的键不能嵌套。** 思源解析命令显示名用的是
+> `a.langText || i18n[a.langKey] || a.langKey` —— 扁平查表。
+> 写成 `{"command": {"foo": "…"}}` 的话 `i18n["foo"]` 是 `undefined`，
+> 命令面板里会直接显示原始 `langKey`（`toggleMindMap` 这种）。
+> 核实脚本：`node tests/kernel/probe-i18n-command.mjs`。
+
+### 实现要点
+
+- **挂载策略**：导图容器插在被标记的 `.list` 元素内部，原大纲通过 CSS 隐藏但保留在 DOM 中。这样 Protyle 重建块时导图随之销毁，下一轮扫描重新挂载，天然不会错位。
+- **变更侦测**：MutationObserver 监听整个文档，按 `.protyle-wysiwyg` 聚合后防抖 160ms 扫描；扫描期间暂停观察器，避免自己的 DOM 写入造成回环。同时用源列表的文本签名判断内容是否真的变了，变了才重渲染。
+- **写回策略**：结构操作优先用 `moveBlock`（保留块 ID）。内核的 `moveBlock` 只支持「移到某块之后」和「追加到某容器末尾」，没有「插入到某块之前」；且 `CheckListItemNesting` 禁止列表项直接包含列表项（降级时 parentID 必须是 `NodeList`）。因此上移 / 下移 / 升级 / 降级都转换成内核能表达的等价操作，只有少数边界位置退回「插入副本 + 删除原块」。
+- **新增子节点的锚点**：`parentID` 不能给列表块（内核拒绝 NodeList 套 NodeList），给列表项 id 又会被插到最前面、让子节点跑到父节点文字上方。所以「追加为最后一个子节点」用 `previousID = 最后一个子节点id`，还没有子节点时用 `previousID = 自己段落的id`。四种写法的实测结果见 `tests/kernel/insert-shapes.mjs`。
+- **缩放用 `zoom` 而不是 `transform: scale()`**：`transform: scale()` 走的是「先把整棵子树栅格化成位图、再交给合成器放大」的路径，合成器一旦缓存了低分辨率位图，放大后文字、描边、SVG 连线会一起变糊；`zoom` 是布局级缩放，浏览器直接按最终尺寸排版并栅格化，不存在「放大一张位图」这一步。代价是 `zoom` 会把元素自身的 `transform: translate` 一起放大，所以屏幕位移要除以缩放比再写回。同时 `.mm-world` 上不加 `will-change: transform`、浮层不用 `backdrop-filter`，避免把子树提升成会缓存位图的合成层。
+- **键盘分发挂在 `document` 捕获阶段**：全屏视图在思源的 `Dialog` 里，而 Dialog 构造时会注册一个 `document` 捕获阶段的焦点陷阱 `trapFocus`，它会在「焦点在弹层第一个可聚焦元素上按 Shift+Tab」时 `preventDefault + stopPropagation`，把降级操作整个吃掉。捕获阶段由外向内，监听器挂得越深排得越靠后，拦不住它；只有自己也挂到 `document` 捕获阶段才能同时拿到事件（`stopPropagation` 不阻止同节点上的其它监听器）。分发时按「事件目标是否落在本视图内」路由。
+- **点击节点要拦 `mousedown` 的默认行为**：`.mm-root` 虽然是 `contenteditable="false"`，但祖先 `.protyle-wysiwyg` 是可编辑的，浏览器默认会把光标放进编辑器，随后 `document.activeElement` 变成 `.protyle-wysiwyg`，导图失去焦点、快捷键整套失效。在节点与空白区的 `mousedown` 上 `preventDefault()` 即可（编辑态不拦，保证能正常选词）。
+- **解析要容忍前端的畸形 DOM**：用块 API 往列表里插 markdown 时，内核返回的事务是「插入一个 NodeList」，前端会照着原样插成 `.list > [.li, .li, .list]`，而内核那边其实已经摊平成同级兄弟了（`getBlockDOM` 是干净的）。解析时遇到直接嵌在列表块里的子列表要递归取出并摊平，否则新插入的节点在导图里根本不出现。
+- **`insertBlock` 的响应结构跨版本不一致**：思源 3.8.4 的 `data` 是**数组**（`data[0].doOperations`），旧版本是 `data.transactions[0].doOperations`。按旧结构取值会拿到 `null`，把一次**已经成功**的插入误判成失败并弹「操作未生效，请重试」。判断成败看 `code === 0`，取新块 ID 时两种结构都要兼容，并且要的是里面 **NodeListItem** 的 ID（外层那个是 NodeList 的 ID）。
+- **全屏弹层里的视图必须交给扫描器一起照看，而且要每次重新解析源元素**：弹层视图不挂在 `.protyle-wysiwyg` 下，扫描流程遍历不到它，会出现「内核改了、行内视图刷新了、唯独弹层里一动不动」。更麻烦的是：结构操作（尤其 `moveBlock`）之后 Protyle 会把整个 `.list` 元素**重建**，弹层视图握着的是旧元素的引用（游离节点），`parseList` 读到的永远是旧内容 —— 于是文本签名永不变化、永远判成「没变」、永远不重渲染。行内视图靠「源元素不在文档里就卸载重挂」自然绕过，弹层视图不会跟着源元素消失，必须每次扫描重新 `querySelector` 出当前那个元素并换源。
+- **零宽字符要清掉**：Protyle 会往块内容里塞 `U+200B`（零宽空格）。它**不在** ECMAScript 的 WhiteSpace 集合里，`trim()` 去不掉，会顺着 `node.text` 渗进序列化 markdown（复制 / 降级副本路径会把它写回内核）、导出文本和搜索匹配。解析时统一清掉 `U+200B–200D / U+2060 / U+FEFF`。
+- **撤销 / 重做得插件自己实现**：思源前端的撤销栈只在事务**带 `undoOperations`** 时才入栈（`common.js`：`if (undoOperations && ...) protyle.undo.add(...)`），而块 API 写出来的事务里 `undoOperations` 恒为空数组（`insertBlock` / `deleteBlock` 实测条数 0，`moveBlock` / `updateBlock` 干脆不返回事务）。也就是说**导图上的增删改天生进不了思源的 Ctrl+Z** —— 一次误删就是不可逆的数据丢失。所以插件自建 `History`：操作前后各取一次列表块的 kramdown 原文当快照，撤销就把原文喂回去。代价写在 `src/core/history.ts` 的注释里（被删块会拿到新 ID、引用失效、折叠状态丢失），但对「误删能救回来」来说值得。Ctrl+Z 只在插件栈非空时接管，栈空时放行给思源 —— 用户刚在正文里打过字，撤销的应该是那次输入。
+- **还原必须写两次**：`updateBlock(listId, kramdown)` 喂一次**不一定够**。形态是「带子列表的列表项后面又跟同级项」时，一次写回会让**最后一个列表项的段落子块脱开**，落成一个「有内容、没有段落」的坏列表项 —— `/api/block/getChildBlocks` 读它读不出文字，导图里就等于凭空少一个节点。真机验收里「Ctrl+Z 撤销删除节点」就是这么失败的：写回载荷 7 个节点一个不少、`code` 也是 0，落库后却只有 6 个。**同样的内容再喂一次就完全还原**，第二次是幂等的。注意 kramdown 层面**看不出**这个缺陷（坏状态读回来的 `{: … }` 块属性行数和目标一模一样），所以别指望「读回来比对再重试」，直接写两次。三种喂法的实测对比见 `tests/kernel/restore-roundtrip.mjs`。
+- **源元素被重建时不能走 `unmount`**：`.mm-root` 是插在 `.list` **内部**的，所以 Protyle 重建 `.list` 时导图跟着一起消失，视图会看到 `source.isConnected === false`。这时**不能**调 `unmount` —— 它带 3 秒的「抑制重挂」，而抑制项只在**下一次扫描**时才清；如果那之后没有新的 DOM 变动，扫描就不再发生，导图会**一直消失**。正确做法是在同一轮扫描里就地把视图重挂到新元素上（卸载时不抑制）。
+- **焦点会被思源编辑器抢走，接管按键之后要抢回来**：`.mm-root` 长在 `.protyle-wysiwyg` 里，按键事件一样会经过编辑器的 keydown 监听，而它会调 `protyle.wysiwyg.element.focus()` —— 给 `HTMLElement.prototype.focus` 打桩实测：按下 Delete 之后 **+2ms** 焦点就从 `.mm-root` 变成 `.protyle-wysiwyg` 了（之后 3.5 秒内不再变）。所以 `handleGlobalKey` 只要 `preventDefault` 了就补一个 `setTimeout(0)` 的抢回（同步的 `focus()` 谁后调用谁赢）；结构写回之后还要再短时重试几轮，因为「扫描 → 重挂」是异步的。时序证据见 `tests/kernel/focus-timeline.mjs`。**但「接管了才抢回」有一个致命缺口**：真实键盘按 `Ctrl+D` 会**先**产生一个 `key === "Control"` 的 keydown，这一下导图没有任何动作可做（不会 `preventDefault`），思源编辑器照样在这个 keydown 里 focus 自己 —— 焦点一丢，紧接着的 `D` 那一下 `e.target` 已经不在 `.mm-root` 里，`handleGlobalKey` 开头就 `return`，于是**整套 `Ctrl+A/C/V/X/D` 在真实键盘下全部失灵**（只有「一次 `rawKeyDown` + `modifiers` 位」的合成按键能过，所以测试一直没暴露）。所以修饰键单独按下那一下也要抢回焦点，并且多补两次（60ms / 200ms，因为编辑器抢焦点有快有慢）；补的两次必须收窄到「焦点确实落在 `.protyle-wysiwyg` 里」，否则会把焦点从刚打开的命令面板输入框里抢回导图。实测见 `tests/kernel/probe-altmod-swallow.mjs`，回归断言见 `tests/kernel/diag-commands.mjs` 的 H 段。
+- **样式隔离**：所有选择器都挂在 `.mm-root` 之下，不写裸标签选择器；颜色只通过 `--mm-*` / `--c-*` 自定义属性注入，不直接引用 `--b3-*` 变量。这样导出 SVG 时把变量解析成具体值即可完整还原外观。
+- **布局引擎**：把坐标抽象成「深度轴」和「交叉轴」，一套代码同时支持左右和上下两种方向；父节点的交叉位置会钳制在自己的占位槽内，避免子树不对称时溢出到兄弟节点位置。
+- **性能保护**：列表块进入视口附近才挂载；节点数超过阈值自动收紧间距，超过渲染上限则暂停渲染并给出「仍然渲染」入口。
+
+## 维护者须知
+
+### 1. 发布已自动化
+
+`.github/workflows/release.yml` 在每次 push 到 `main` 时运行：
+
+1. 跑 `npm run check` —— 8 道静态校验 + 312 条单元断言 + 96 条产物冒烟断言
+2. 构建 `package.zip`，并校验它含齐必需文件
+3. 创建 tag 为 `v<version>` 的 GitHub Release —— **该版本已发过就跳过**（幂等）
+
+**发新版本只需两步：改 `plugin.json` 的 `version`，push 到 `main`。**
+
+> ⚠️ 为什么非得有 Release，不能只 push 代码：**集市拉取的是 Release 里的 `package.zip`，
+> 不是仓库里的源码。** 这一点在本仓库比一般插件更要紧 —— `.gitignore` 排除了
+> `index.js` / `index.css` / `i18n/` 这些**构建产物**，所以「仓库源码」本身
+> **不是一个可用的插件包**。
+
+### 2. 仓库侧要求（已满足，别改坏）
+
+- **仓库名必须与 `plugin.json` 的 `name` 完全一致**（即 `siyuan-plugin-mindmap`）——
+  集市按 `name` 做唯一性校验
+- **默认分支必须是 `main`** —— 发布工作流靠它触发
+- Release 的 tag 用 `v<version>` 形式（与官方 `plugin-sample` 风格一致）
+- `.gitignore` 里的根级产物**必须带前导 `/` 锚定**。不要写裸的 `i18n/` 或 `index.css`：
+  它们会匹配**任意层级**，从而把真源 `src/i18n/*.json` 与 `src/styles/index.css`
+  静默排除在仓库之外。
+
+### 3. 语言与 README（默认中文）
+
+本插件面向中文用户，所以**兜底值是中文**：`plugin.json` 里 `displayName` /
+`description` / `readme` 三处的 `default` 都是中文，英文单独用 `en` / `en_US` 两个键。
+
+思源内核的取值顺序是（`kernel/bazaar/package.go` 的 `GetPreferredLocaleString`）：
+
+```
+当前语种 → 旧式下划线语种 → default → en → en_US
+```
+
+`LangToLegacy` 会把 `zh-CN` 映射成 `zh_CN`、`en` 映射成 `en_US`，所以两种写法内核都认。
+**注意 `default` 排在 `en` 前面** —— 一旦把 `default` 改成中文，英文用户就必须靠
+`en` 或 `en_US` 兜住，否则会看到中文。这就是为什么两个英文键都留着：
+
+| 用户的思源语言 | 命中的键 | 看到 |
+| --- | --- | --- |
+| `zh-CN` / `zh_CN` | `default` | 中文 |
+| `en` | `en` | 英文 |
+| `en_US`（旧版） | `en_US` | 英文 |
+| `ja` / `de` / … 其它 | `default` | 中文 |
+
+**两份 README 的分工**：
+
+- `README.md` —— 中文，GitHub 首页与集市详情的默认展示
+- `README_en_US.md` —— 英文
+
+> ⚠️ 改文件名时**必须同步改 `plugin.json` 的 `readme` 映射**。漏改在本地看不出来 ——
+> 集市只会安静地不显示 README，不报任何错。`scripts/build.mjs` 里有一道门会拦住这种漏改：
+> 清单指向的文件没被打进 `package.zip`，构建直接失败。
+
+### 4. 关于 `minAppVersion`（曾经写错，记一下为什么是现在这个值）
+
+现在是 **`3.6.4`**，不是随手填的：插件用到了
+`/api/block/batchUpdateTaskListItemMarker` —— **批量**勾选待办的内核接口
+（选中若干节点后一次性勾选，一次往返即一次事务）。它由
+[PR #17461](https://github.com/siyuan-note/siyuan/pull/17461) 引入、
+里程碑 **3.6.4**。低于这个版本，「批量勾选」会失败。
+
+> ⚠️ 别把它和 `/api/block/updateTaskListItemMarker` 搞混 —— 那是**单条**勾选
+> （勾一个待办）走的老接口，不构成版本门槛。定 `minAppVersion` 时要取的是
+> **插件用到的所有内核接口里门槛最高的那个**，不是第一个想起来的那个。
+
+> 早先这里是 `3.1.0` —— 一个**没有任何依据**的值。开发与验收全部在
+> **思源 3.8.4** 上做的（源码里 6 处实测注释写的都是 3.8.4）。
+> 如果你想要更保守的声明，可以把 `minAppVersion` 提到 `3.8.4`，
+> 那就只放行实测过的版本，代价是老用户装不上。
+
+### 5. 已核对过的字段（无需改动）
 
 `name` / `version` / `displayName` / `description` / `readme` / `icon` / `preview` /
-`backends` / `frontends` have all been checked against the official spec:
+`backends` / `frontends` 都已按官方规范核对：
 
-- Icon 160×160, 4.4 KB (limit 64 KB); preview 1024×768, 28.8 KB (limit 512 KB)
-- `package.zip` contains `index.js` / `index.css` / `plugin.json` / `i18n/*` /
-  `README.md` / `README_zh_CN.md` / `icon.png` / `preview.png` — matches the required file list
-- `frontends: ["all"]` (including mobile) is **actually tested**, not a bare claim —
-  see `tests/kernel/probe-mobile-touch.mjs`, which runs against the real mobile frontend
-  (`/stage/build/mobile/`) and verifies loading, rendering, tap-to-select, long-press menu,
-  drag-to-pan, and checkbox writes to the kernel
-- `disabledInPublish: true`: the plugin stays disabled in the **publish service**.
-  That is deliberate — a published page has no runtime for this plugin, and claiming
-  otherwise would only produce a half-rendered page. In other words:
-  **in a published document, a mind map degrades to a plain outline list.**
+- 图标 160×160、4.4 KB（上限 64 KB）；预览图 1024×768、28.8 KB（上限 512 KB）
+- `package.zip` 含 `index.js` / `index.css` / `plugin.json` / `i18n/*` /
+  `README.md` / `README_en_US.md` / `icon.png` / `preview.png`，符合必需文件清单
+- `frontends: ["all"]`（含移动端）**是实测过的**，不是空口声明 ——
+  见 `tests/kernel/probe-mobile-touch.mjs`：在真实的移动端前端
+  （`/stage/build/mobile/`）上验过加载、渲染、点选、长按菜单、拖动平移与复选框写入
+- `disabledInPublish: true`：插件在**发布服务**（分享出去的页面）里不启用。
+  这是有意为之 —— 发布页没有本插件的运行环境，声明成启用只会让分享出去的页面
+  出现半成品状态。也就是说：**分享出去的文档里，导图会退化成普通大纲列表。**
 
-## License
+## 许可
 
 MIT

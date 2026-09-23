@@ -12,16 +12,19 @@
   ],
   "disabledInPublish": true,
   "displayName": {
-    "default": "Outline Mind Map",
-    "zh-CN": "大纲导图"
+    "default": "大纲导图",
+    "en": "Outline Mind Map",
+    "en_US": "Outline Mind Map"
   },
   "description": {
-    "default": "Render outline blocks (unordered / ordered / task list) as professional mind maps.",
-    "zh-CN": "把无序列表、有序列表、任务列表三种大纲块渲染为专业级思维导图。"
+    "default": "把无序列表、有序列表、任务列表三种大纲块渲染为专业级思维导图。",
+    "en": "Render outline blocks (unordered / ordered / task list) as professional mind maps.",
+    "en_US": "Render outline blocks (unordered / ordered / task list) as professional mind maps."
   },
   "readme": {
     "default": "README.md",
-    "zh-CN": "README_zh_CN.md"
+    "en": "README_en_US.md",
+    "en_US": "README_en_US.md"
   },
   "icon": "icon.png",
   "preview": "preview.png",

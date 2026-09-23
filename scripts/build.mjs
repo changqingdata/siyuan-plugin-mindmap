@@ -165,6 +165,32 @@ function makePackageZip() {
     if (exists(f)) add(f, f);
   }
 
+  /* 清单自检：plugin.json 指向的文件必须真的被打进包里 ────────────────────
+   *
+   * 为什么值得一道门：`readme` 是「语种 → 文件名」的映射，改文件名时极易漏改，
+   * 而漏改的后果**在本地完全看不出来** —— 思源集市只会安静地不显示 README，
+   * 不报任何错（`GetPreferredLocaleString` 取不到就回落，回落不到就是空）。
+   * 让构建直接失败，比等人去集市里发现便宜得多。
+   *
+   * 注意这里查的是「在不在 entries 里」而不是「文件存不存在」：只存在但没被打包，
+   * 集市那边同样是拿不到的。 */
+  const manifest = JSON.parse(fs.readFileSync(p("plugin.json"), "utf8"));
+  const packed = new Set(entries.map((e) => e.name));
+  const problems = [];
+  for (const [lang, file] of Object.entries(manifest.readme || {})) {
+    if (!packed.has(file)) problems.push(`readme.${lang} → ${file}`);
+  }
+  for (const key of ["icon", "preview"]) {
+    const f = manifest[key];
+    if (f && !packed.has(f)) problems.push(`${key} → ${f}`);
+  }
+  if (problems.length) {
+    console.error("[mindmap] plugin.json 指向的文件没有被打进 package.zip：");
+    for (const x of problems) console.error("  · " + x);
+    console.error("[mindmap] 包内实际有的文件：" + [...packed].join(", "));
+    process.exit(1);
+  }
+
   const out = makeZip(entries);
   fs.writeFileSync(p("package.zip"), out);
   console.log(`[mindmap] package.zip 已生成（${entries.length} 个文件，${(out.length / 1024).toFixed(1)} KB）`);

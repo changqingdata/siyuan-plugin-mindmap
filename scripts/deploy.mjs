@@ -99,7 +99,7 @@ const FILES = [
     "icon.png",
     "preview.png",
     "README.md",
-    "README_zh_CN.md",
+    "README_en_US.md",
     "LICENSE",
 ];
 const DIRS = ["i18n"];
