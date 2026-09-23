@@ -137,7 +137,15 @@ const AUTO_SCROLL_SPEED = 9;
 const LAYOUT_PAD_X = 72;
 const LAYOUT_PAD_Y = 64;
 
-/** 小地图最少节点数。低于这个数「一眼能看完」，再挂个缩略图纯属占地方 */
+/**
+ * 小地图的最少节点数。低于这个数「一眼能看完」，再挂个缩略图纯属占地方
+ * （见 `docs/画布与工具交互增强建议.md` 的 P1-3）。
+ *
+ * ⚠️ 但这条线**用户看不见** —— 设置里开关明明开着、右下角却什么都没有，
+ * 很容易被当成插件坏了（真机上就收到过这样的反馈）。
+ * 所以 `config.minimapAlways` 留了个显式出口：想一直看到它，打开那个开关即可。
+ * 分工是：**阈值负责「默认清爽」，开关负责「用户说了算」**。
+ */
 const MINIMAP_MIN_NODES = 30;
 /** 小地图最多画多少个矩形，超过就抽样 */
 const MINIMAP_MAX_RECTS = 700;
@@ -3624,10 +3632,7 @@ export class MindMapView {
         if (modOnly && key.toLowerCase() === "a") return take(() => this.selectAllSiblings());
         if (modOnly && key.toLowerCase() === "d") return take(() => void this.runAction("duplicate", cur));
         if (modOnly && key.toLowerCase() === "c") {
-            return take(() => {
-                this.clipboard = serializeSubtree(cur);
-                void this.copyNodeText(cur);
-            });
+            return take(() => void this.copySubtree(cur));
         }
         if (modOnly && key.toLowerCase() === "v") {
             if (!this.clipboard) return;
@@ -4125,10 +4130,7 @@ export class MindMapView {
         if (n.children.length > 0) {
             item(n.folded ? this.t("menu.expandN", "展开（{n} 个子节点）", { n: n.children.length }) : this.t("tip.collapseChildren", "折叠子节点"), this.t("tip.space", "空格"), false, () => this.toggleFold(n));
         }
-        item(this.t("menu.copySubtree", "复制子树"), "Ctrl C", false, () => {
-            this.clipboard = serializeSubtree(n);
-            void this.copyNodeText(n);
-        });
+        item(this.t("menu.copySubtree", "复制子树"), "Ctrl C", false, () => void this.copySubtree(n));
         item(this.t("menu.quickCopy", "快速复制"), "Ctrl D", !n.id, () => act("duplicate"));
         item(this.t("menu.copyText", "复制文字"), "", false, () => void this.copyNodeText(n));
         item(this.t("menu.locateInEditor", "定位到编辑器"), "", !n.id, () => this.cb.onLocate(n.id));
@@ -4312,6 +4314,25 @@ export class MindMapView {
     private async copyNodeText(n: MMNode) {
         const ok = await copyText(n.text);
         if (ok) showMessage(this.t("msg.nodeTextCopied", "已复制节点文字"));
+        else showMessage(this.t("msg.copyFailed", "复制失败"), 4000, "error");
+    }
+
+    /**
+     * 「复制子树」—— 两份剪贴板，各司其职。
+     *
+     * ① 图内剪贴板（`this.clipboard`）放**整棵子树的 markdown**，供图内 `Ctrl+V`
+     *    「粘贴为子节点」用。速查表承诺的就是这一条（「Ctrl+C 复制子树 · Ctrl+V 粘贴为子节点」）。
+     * ② 系统剪贴板放**这个节点自己的文字** —— 用户按 Ctrl+C 之后多半还想粘到别处，
+     *    往系统剪贴板塞一段带 `-` 缩进的 markdown 反而更碍事；要纯文字用「复制文字」也一样。
+     *
+     * ⚠️ 提示语必须说清是**子树**。原来这条路径直接复用 `copyNodeText`，
+     * 于是用户点了「复制子树」却看到「已复制节点文字」—— 反馈和动作对不上，
+     * 会让人以为点错了。行为没变，只把话说准。
+     */
+    private async copySubtree(n: MMNode) {
+        this.clipboard = serializeSubtree(n);
+        const ok = await copyText(n.text);
+        if (ok) showMessage(this.t("msg.subtreeCopied", "已复制子树 · 在导图里按 Ctrl+V 可粘贴为子节点"), 2600);
         else showMessage(this.t("msg.copyFailed", "复制失败"), 4000, "error");
     }
 
@@ -4559,7 +4580,10 @@ export class MindMapView {
 
     private refreshMinimap() {
         const root = this.tree;
-        const on = !!this.options.minimap && !!root && this.nodeCount >= MINIMAP_MIN_NODES;
+        // 阈值负责「默认清爽」，`minimapAlways` 负责「用户说了算」——
+        // 那条 30 的线用户看不见，所以必须给一个显式出口（见常量上方注释）。
+        const on =
+            !!this.options.minimap && !!root && (!!this.options.minimapAlways || this.nodeCount >= MINIMAP_MIN_NODES);
         if (!on) {
             this.minimapEl.style.display = "none";
             this.minimapEl.innerHTML = "";

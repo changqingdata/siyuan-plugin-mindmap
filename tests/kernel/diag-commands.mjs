@@ -493,6 +493,23 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
     await sleep(2400);
     ok((await page.eval(attrOf(listA))) !== null, "★「当前列表：转为导图」生效了", String(await page.eval(attrOf(listA))));
 
+    /* ---- ②b 同一项应当**跟着状态翻面**，点回去能收回大纲 ----
+       这是「点一下没反应」最容易藏身的地方：标签没跟着状态走，用户在已经转了导图的
+       列表上再看到「转为导图」，点下去画面当然毫无变化 —— 他会以为插件坏了，
+       而静态审计里这一项一直是零命中（只测过「转为导图」这个方向）。
+       所以这里把**标签翻面 + 反向生效**两件事一起钉住。 */
+    const items2b = await openTopBar(page);
+    const backLabel = items2b.find((t) => t.includes("当前列表")) || "";
+    ok(backLabel.includes("切回大纲视图"), "★ 已是导图时，同一项翻成「当前列表：切回大纲视图」", backLabel);
+    await clickMenuItem(page, "当前列表");
+    await sleep(2400);
+    ok((await page.eval(attrOf(listA))) === null, "★「当前列表：切回大纲视图」真的把它收回了大纲", String(await page.eval(attrOf(listA))));
+    // 再转回导图 —— 下面 ③ 的前提是「列表已经是导图」
+    await openTopBar(page);
+    await clickMenuItem(page, "当前列表");
+    await sleep(2400);
+    ok((await page.eval(attrOf(listA))) !== null, "再点一次又转回导图（它本来就是同一个开关）", String(await page.eval(attrOf(listA))));
+
     /* ---- ③ 已经是导图时点「并排查看」：应当**明确拒绝**，而不是默默无反应 ----
        并排面板的定位是「大纲在左、导图在右」，列表本身已经是导图时没有大纲可并排。 */
     await openTopBar(page);

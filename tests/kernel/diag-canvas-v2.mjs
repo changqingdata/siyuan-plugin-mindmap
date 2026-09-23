@@ -15,7 +15,8 @@
  *   5. P0-1 批量整体回滚  批量删除 → 节点数归零 → Ctrl+Z 还原
  *   6. P1-1 悬停预览      折叠节点后悬停珠子 → 浮出 .mm-preview 且列出子节点
  *   7. P1-2 连线语义化    已完成任务的支线带 stroke-dasharray；新插入节点有 .mm-fresh
- *   8. P1-3 小地图        小图隐藏；大图显示，且选中节点在小地图上有标记
+ *   8. P1-3 小地图        阈值 30 生效（小图默认隐藏）；「始终显示」开关能越过阈值；
+ *                        总开关关掉后一定消失；大图默认显示，且选中节点在小地图上有标记
  *   9. P1-4 缩放菜单      点缩放标签 → 菜单里出现「适应选中节点」
  *  10. P2-1 双向高亮      导图选中节点 → 大纲对应 .li 得到 mm-outline-hit
  *  11. P2-3 演示模式      进入后逐层展开、方向键推进、退出后**大纲 kramdown 一字未改**
@@ -911,12 +912,53 @@ try {
 
     /* ============================================================ 8. P1-3 小地图 */
     console.log("\n[8] P1-3 小地图增强");
+
+    // ★ 定稿行为（2026-09-23）：**阈值 + 开关，两层**。
+    //   ① `minimap`（总开关）关掉 → 一定没有。
+    //   ② `minimapAlways` 打开 → 节点再少也显示。
+    //   ③ 两个都不动 → 只有节点数 ≥ 30 才显示（默认清爽）。
+    //
+    //   为什么保留阈值，而不是一刀切成「总是显示」：设计文档 P1-3 明确写过
+    //   「节点数少（比如 < 30）时自动隐藏小地图 —— 小图上也挂个小地图，纯占地方」
+    //   （`docs/画布与工具交互增强建议.md`）。
+    //   但那条线**用户看不见** —— 设置里开关明明开着、右下角却什么都没有，
+    //   只能当成插件坏了（真机反馈就是这么来的）。所以给一个**显式出口**，
+    //   而不是把阈值删掉。
+    //
+    //   ⚠️ 这里必须**两个方向都验**：只验「打开后出现」看不出「总开关还是硬门」，
+    //      只验「关掉后消失」看不出「始终显示真的能越过阈值」。
+    const setCfg = (patch) =>
+        page.eval(`(() => {
+            const p = ${MM_PLUGIN};
+            if (!p || !p.scanner) return false;
+            Object.assign(p.config, ${JSON.stringify(patch)});
+            p.scanner.refreshAll();
+            return true;
+        })()`);
+
     const s8a = await page.eval(STATE);
-    ok(!s8a.minimap, "小图（10 个节点）自动隐藏小地图");
+    ok(s8a.total < 30, "小图节点数确实低于阈值", `${s8a.total} 个（阈值 30）`);
+    ok(!s8a.minimap, "小图默认不显示小地图（阈值生效，保持默认清爽）");
+
+    // 显式出口：打开「始终显示」→ 小图也显示
+    await setCfg({ minimapAlways: true });
+    await sleep(800);
+    ok((await page.eval(STATE)).minimap, "打开「小地图始终显示」后，小图也显示出来");
+
+    // 反向：总开关是硬门，`minimapAlways` 越不过它
+    await setCfg({ minimap: false });
+    await sleep(800);
+    ok(!(await page.eval(STATE)).minimap, "关掉「小地图」总开关后它真的消失（始终显示也越不过）");
+
+    // 复原：回到默认（总开关开、始终显示关）→ 小图重新回到不显示
+    await setCfg({ minimap: true, minimapAlways: false });
+    await sleep(800);
+    ok(!(await page.eval(STATE)).minimap, "关掉「始终显示」后小图回到默认（阈值重新生效）");
+
     await openDoc(docB, "大图");
     const s8b = await page.eval(STATE);
     ok(s8b.total >= 30, "大图节点数达标", `${s8b.total} 个`);
-    ok(s8b.minimap, "大图显示小地图");
+    ok(s8b.minimap, "大图默认就显示小地图（不需要开「始终显示」）");
     await clickExpr(page, nodeAt(1), { settle: 400 });
     const s8c = await page.eval(STATE);
     ok(s8c.minimapSel >= 1, "小地图上标出了选中节点", `${s8c.minimapSel} 个标记`);

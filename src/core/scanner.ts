@@ -683,8 +683,32 @@ export class Scanner {
 
     /* ================================================================ 写回动作 */
 
+    /**
+     * 整块写回之后的重扫。
+     *
+     * ⚠️⚠️ 为什么是**一串**而不是一次 —— 这里踩过一个「导图凭空消失」的真 bug。
+     *
+     * `restoreBlock()` 走 markdown 通道把整个列表写两次，Protyle 收到事务后会把
+     * **整个 `.list` 元素换掉**（新元素由内核属性重新渲染，旧元素连同它里面的
+     * `.mm-root` 一起脱离文档）。换元素的时机比我们这一次定时器**晚，而且晚多少不确定**。
+     *
+     * 晚到的后果是致命的：`views` 里还留着那个已经脱离文档的视图，而
+     *   - `scan()` 第 1 步的 `if (this.views.has(id)) continue;` 会把它挡住，不去挂新元素；
+     *   - 唯一能清掉它的 `prune()` 只在 `scan()` 里跑 —— 可 `scan()` 没人叫了
+     *     （那次 DOM 变动没被 `onMutations` 记成「脏」）。
+     * 于是**导图一直消失，再也不会回来**。实测（`diag-node-menu.mjs` 的 [10]，
+     * 在导图里 Ctrl+V 粘贴后 Ctrl+Z）：`views` 里视图还在、`suppressed` 是空的、
+     * 但 `rootConnected` 与 `srcConnected` 全是 false —— 手动补一次 `scanAll()`
+     * 立刻恢复，这就把「扫描逻辑错了」排除掉了，问题只在**没人扫**。
+     *
+     * 所以按 120/420/900/1800ms 连扫几次，把 Protyle 的异步窗口整个盖住。
+     * 多次扫描是幂等的：`prune()` 只删脱离文档的视图，第 1 步只挂没挂过的元素，
+     * `render()` 只在签名真的变了时才跑（第一次扫完签名就对齐了，后面几次是空转）。
+     */
     private rescanSoon() {
-        window.setTimeout(() => this.scanAll(), 140);
+        for (const delay of [120, 420, 900, 1800]) {
+            window.setTimeout(() => this.scanAll(), delay);
+        }
     }
 
     /* ---- 撤销快照 ----

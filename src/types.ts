@@ -255,8 +255,18 @@ export interface MMConfig extends MMRenderOptions {
     keyboard: boolean;
     /** 布局变化时播放节点位移过渡 */
     flipAnimation: boolean;
-    /** 节点较多时显示右下角小地图 */
+    /** 显示右下角小地图 */
     minimap: boolean;
+    /**
+     * 小地图「始终显示」。
+     *
+     * 默认关闭 —— 节点少时小地图是冗余的（整张图本来就在视野里），挂上去只占地方，
+     * 所以默认只在节点数达标时才出现（见 `renderer.ts` 的 `MINIMAP_MIN_NODES`）。
+     *
+     * 但那条线**用户看不见**：开关明明开着、右下角却什么都没有，很容易被当成插件坏了。
+     * 所以给一个显式出口 —— 想一直看到它，打开这个即可，不必去猜阈值是多少。
+     */
+    minimapAlways: boolean;
     /** 节点数超过该值时自动降级为紧凑模式 */
     compactThreshold: number;
     /** 节点数超过该值时默认不渲染，需手动确认 */
@@ -298,6 +308,9 @@ export const DEFAULT_CONFIG: MMConfig = {
     keyboard: true,
     flipAnimation: true,
     minimap: true,
+    // 默认 false = 保持原有行为（节点少时自动隐藏）。想一直看到小地图的用户
+    // 可以在设置里显式打开，而不是去猜那条看不见的阈值。
+    minimapAlways: false,
     compactThreshold: 400,
     hardLimit: 2000,
     columnLayout: true,

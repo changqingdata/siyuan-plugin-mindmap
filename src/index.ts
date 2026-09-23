@@ -895,9 +895,21 @@ export default class MindMapPlugin extends Plugin {
             draft.flipAnimation = v;
         });
 
-        addToggle(this.t("ui.minimap", "小地图"), this.t("set.minimapDesc", "节点较多时在右下角显示缩略图，可点击跳转"), this.config.minimap, (v) => {
+        addToggle(this.t("ui.minimap", "小地图"), this.t("set.minimapDesc", "在右下角显示缩略图，可点击跳转"), this.config.minimap, (v) => {
             draft.minimap = v;
         });
+
+        // 「小地图」下面紧跟这一条：它只是上一条的补充。
+        // 单独列出来是因为「节点少时自动隐藏」那条线用户看不见 ——
+        // 开关开着却没有东西，只会被当成插件坏了。
+        addToggle(
+            this.t("set.minimapAlways", "小地图始终显示"),
+            this.t("set.minimapAlwaysDesc", "打开后，节点较少时也显示缩略图。默认只在节点较多（30 个以上）时显示 —— 小图一眼能看完，缩略图是多余的。"),
+            this.config.minimapAlways,
+            (v) => {
+                draft.minimapAlways = v;
+            },
+        );
 
         addToggle(
             this.t("set.viewPerDoc", "视图偏好跟文档走"),

@@ -591,7 +591,7 @@ try {
     const titles = await texts(".b3-dialog--open .config-name");
     const WANT = ["显示层级编号", "紧凑模式", "Ctrl + 滚轮缩放", "滚轮平移导图", "懒渲染", "布局动效", "视图偏好跟文档走", "悬停预览折叠节点", "渲染上限", "紧凑模式阈值"];
     const missing = WANT.filter((w) => !titles.some((t) => t.includes(w)));
-    ok(titles.length >= 25, "设置面板条目数（≥25）", `${titles.length} 项`);
+    ok(titles.length >= 26, "设置面板条目数（≥26）", `${titles.length} 项`);
     ok(missing.length === 0, "本文件验的每一项都能在设置面板上找到（设置项与代码没脱节）", missing.length ? `缺：${missing.join(" / ")}` : "10/10 命中");
     const helpBtn = await page.eval(`(() => {
         const row = [...document.querySelectorAll('.b3-dialog--open .config-name')].find((e) => (e.textContent || '').includes('查看快捷键'));
