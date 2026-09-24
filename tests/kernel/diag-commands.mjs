@@ -14,18 +14,27 @@
  *   ② 显式补发 ControlLeft 按下 / 抬起 → 唤得起
  *   ③ keyDown 带 text                  → 唤得起
  *
- * 所以本文件用 `hotkey()`（方法 ②）发键。**这不是插件的问题，是发键方式的问题** ——
+ * 所以本文件用 `spaceKey()` / `altShift()`（方法 ②）发键。**这不是插件的问题，是发键方式的问题** ——
  * 上一版探针正因为踩了这个坑，把「快捷键没反应」误判成了插件的 bug。
  *
  * ## 覆盖
  *   A 命令面板   → 三条命令显示中文，不是裸标识符（P0-2 的真机验收）
- *   B ⌥⌘D        → 导图 / 大纲来回切，内核属性跟着写、跟着清
- *   C ⌥⌘V        → 并排面板开 / 关
- *   D ★ 回归     → 导图**有焦点**时按 ⌥⌘D，不能被导图自己的 Ctrl+D 吃掉
+ *   B Ctrl+空格  → 导图 / 大纲来回切，内核属性跟着写、跟着清
+ *   C Alt+空格   → 并排面板开 / 关
+ *   D ★ 回归     → 导图**有焦点**时按 Ctrl+空格，不能被导图自己的空格（折叠）吃掉
  *   E 顶栏菜单   → 五个动作逐个点，逐个生效
  *   F 迁移命令   → 唯一**会写数据**的那条命令，真机跑一遍（含 table 反例）
- *   G ★ 通用规则 → 导图不吃**任何** ⌥⌘ 组合，不只是 D 和 V 那两个
+ *   G ★ 通用规则 → 导图不吃**任何** ⌥⌘ 组合，不只是带修饰键的空格
  *   H ★ 回归     → **真实键盘式**的 Ctrl+D 也要能到插件（焦点不被思源编辑器抢走）
+ *
+ * ⚠️ 两条全局命令的默认键位在 1.0.x 期间从 `⌥⌘D` / `⌥⌘V` 换成了
+ * `Ctrl+空格` / `Alt+空格`（思源键位串是 `"⌘ "` / `"⌥ "` —— 空格是**字面空格**，
+ * 见 `index.ts` 的 `HOTKEY_TOGGLE` 注释）。发键方式也跟着多了一个 `spaceKey()`：
+ * `combo()` 按字母拼 `code`，空格既不是字母也没有 `KeySpace` 这种 code。
+ *
+ * ⚠️ 换键位**没有削弱 D / G 两段的价值**：它们守的是「导图只判主键、不判修饰键」
+ * 这个机理，与具体是哪个键无关 —— 导图自己的 `空格` 是折叠 / 展开，一样会被
+ * `Ctrl+空格` 撞上。
  *
  * ## 第二个坑：命令面板是 ⌥⇧P，不是 ⌘P
  *
@@ -42,8 +51,8 @@
  *
  * ## 第四个坑：发修饰键组合有两种方式，用途**不能互换**
  *
- *  · `combo()` —— 先补发裸修饰键（ControlLeft / AltLeft）的 keydown，再发字母。
- *    **能唤起思源的全局快捷键**（⌥⌘D / ⌥⇧P 都靠它）。
+ *  · `combo()` / `spaceKey()` —— 先补发裸修饰键（ControlLeft / AltLeft）的 keydown，再发主键。
+ *    **能唤起思源的全局快捷键**（Ctrl+空格 / ⌥⇧P 都靠它）。
  *  · `comboSingle()` —— 只发字母那一下并带上 `modifiers` 位，不补修饰键。
  *    事件目标留在导图里，**插件的键盘处理器收得到**；但唤不起全局快捷键。
  *
@@ -54,8 +63,8 @@
  *
  * 结果就是：拿 `combo()` 去测「导图会不会误吃 ⌥⌘X」，测出来永远是绿的，
  * 但绿的原因是「插件根本没收到」，属于假绿。**G 段第一版正是这么翻的车。**
- * 所以：测全局快捷键用 `hotkey` / `altShift`，测「导图自己的 Ctrl+X 会不会误触发」
- * 必须用 `hotkeySingle`。
+ * 所以：测全局快捷键用 `hotkeyToggle` / `hotkeySide` / `altShift`，
+ * 测「导图自己的 Ctrl+X 会不会误触发」必须用 `hotkeySingle`。
  *
  * **反过来也成立，而且更严重**：真实键盘就是「先裸修饰键、再字母」的顺序，
  * 而 `tests/` 里所有键盘用例用的都是单事件发法 —— 于是「真实键盘下按 Ctrl+D
@@ -154,10 +163,70 @@ async function combo(page, key, { ctrl = false, alt = false, shift = false, gap 
     await sleep(140);
 }
 
-/** ⌥⌘<key>（思源在 Windows 上把 ⌘ 归一成 Ctrl、⌥ 归一成 Alt） */
-const hotkey = (page, key) => combo(page, key, { ctrl: true, alt: true });
-/** ⌥⇧<key> */
+/** ⌥⇧<key>（命令面板） */
 const altShift = (page, key) => combo(page, key, { alt: true, shift: true });
+
+/**
+ * 带修饰键的**空格**。插件两条全局命令的默认键位都是空格（`Ctrl+空格` / `Alt+空格`）。
+ *
+ * ⚠️ 不能复用 `combo()`：它按 `Key<字母>` 拼 `code`、按字母取虚拟键码，
+ * 而空格既不是字母、也没有 `KeySpace` 这种 code（正确的是 `Space`，虚拟键码 32）。
+ * 32 这个数就是思源键位表里的 `KEYCODELIST[32] = " "` —— 也就是说
+ * `Ctrl+空格` 在思源的键位串里是 `"⌘ "`（**字面空格**，不是 `"⌘Space"`）。
+ *
+ * ⚠️ 本机是 Windows 时 `Ctrl+空格` 同时是**输入法切换**的默认热键，但
+ * CDP 的事件直接注入渲染进程、不经过系统输入法，所以这里能测通。
+ * **这不等于真机上一定能用** —— 装了中文输入法就可能被系统层截走。
+ * 那个风险是已知的、写在 `index.ts` 的 `HOTKEY_TOGGLE` 注释里。
+ */
+async function spaceKey(page, { ctrl = false, alt = false } = {}) {
+    const bits = (alt ? 1 : 0) | (ctrl ? 2 : 0);
+    const held = [];
+    if (ctrl) held.push({ key: "Control", code: "ControlLeft", vk: 17 });
+    if (alt) held.push({ key: "Alt", code: "AltLeft", vk: 18 });
+    for (const m of held) {
+        await page.send("Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            key: m.key,
+            code: m.code,
+            windowsVirtualKeyCode: m.vk,
+            nativeVirtualKeyCode: m.vk,
+            modifiers: bits,
+        });
+    }
+    await sleep(130);
+    await page.send("Input.dispatchKeyEvent", {
+        type: "rawKeyDown",
+        key: " ",
+        code: "Space",
+        windowsVirtualKeyCode: 32,
+        nativeVirtualKeyCode: 32,
+        modifiers: bits,
+    });
+    await page.send("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: " ",
+        code: "Space",
+        windowsVirtualKeyCode: 32,
+        nativeVirtualKeyCode: 32,
+        modifiers: bits,
+    });
+    for (const m of [...held].reverse()) {
+        await page.send("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: m.key,
+            code: m.code,
+            windowsVirtualKeyCode: m.vk,
+            nativeVirtualKeyCode: m.vk,
+            modifiers: 0,
+        });
+    }
+    await sleep(140);
+}
+/** 插件默认的「把光标所在的列表切换为导图 / 大纲」= Ctrl+空格 */
+const hotkeyToggle = (page) => spaceKey(page, { ctrl: true });
+/** 插件默认的「并排面板打开导图」= Alt+空格 */
+const hotkeySide = (page) => spaceKey(page, { alt: true });
 
 /**
  * 单事件发键：**不补发裸修饰键的 keydown**，只在字母那一下带上 `modifiers` 位。
@@ -413,41 +482,43 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
         await sleep(700);
     }
 
-    /* ============================== B. ⌥⌘D 切换导图 / 大纲 ============================== */
-    console.log("\n【B ⌥⌘D 一键切换】");
+    /* ============================== B. Ctrl+空格 切换导图 / 大纲 ============================== */
+    console.log("\n【B Ctrl+空格 一键切换】");
     await clickAt(page, await page.eval(caretPoint(firstLi)));
     await sleep(500);
-    await hotkey(page, "d");
+    await hotkeyToggle(page);
     await sleep(2200);
     ok(await page.eval(`!!document.querySelector('.mm-root .mm-node')`), "★ 按下后列表变成了导图");
     ok((await page.eval(attrOf(listA))) === "logic", "★ 内核属性也写上了", String(await page.eval(attrOf(listA))));
     ok((await kids(listA)).length === itemsA, "内核列表项数没变（切换只是换视图，不动内容）", `${itemsA} → ${(await kids(listA)).length}`);
 
-    await hotkey(page, "d");
+    await hotkeyToggle(page);
     await sleep(2200);
     ok(!(await page.eval(`!!document.querySelector('.mm-root .mm-node')`)), "★ 再按一次切回大纲");
     ok((await page.eval(attrOf(listA))) === null, "★ 内核属性被清掉了", String(await page.eval(attrOf(listA))));
 
-    /* ============================== C. ⌥⌘V 并排面板 ============================== */
-    console.log("\n【C ⌥⌘V 并排查看】");
+    /* ============================== C. Alt+空格 并排面板 ============================== */
+    console.log("\n【C Alt+空格 并排查看】");
     await clickAt(page, await page.eval(caretPoint(firstLi)));
     await sleep(500);
-    await hotkey(page, "v");
+    await hotkeySide(page);
     await sleep(2000);
     ok(await page.eval(`!!document.querySelector('.mm-side')`), "★ 并排面板打开了");
     ok(await page.eval(`!!document.querySelector('.mm-side .mm-node')`), "面板里真的渲染出了导图");
 
-    await hotkey(page, "v");
+    await hotkeySide(page);
     await sleep(1600);
     ok(!(await page.eval(`!!document.querySelector('.mm-side')`)), "★ 再按一次关掉");
 
     /* ============================== D. ★ 回归：导图有焦点时全局键不能被吃掉 ============================== */
-    console.log("\n【D ★ 回归：导图有焦点时按 ⌥⌘D】");
-    console.log("  （起因：导图自己的 `Ctrl+D` 是「复制节点」，只判 mod 的话会把 ⌥⌘D 一起吃掉 ——");
+    console.log("\n【D ★ 回归：导图有焦点时按 Ctrl+空格】");
+    console.log("  （起因：导图自己的 `Ctrl+D` 是「复制节点」，只判 mod 的话会把带修饰键的组合一起吃掉 ——");
     console.log("   实测后果是全局切换键失效，而且**把选中节点的子树复制一份写进了内核**）");
+    console.log("  （注意：键位已从 ⌥⌘D 换成 Ctrl+空格，但这条回归的**机理没变** ——");
+    console.log("   导图自己的 `空格` 是「折叠 / 展开」，一样只判主键，一样会把 Ctrl+空格 吃掉）");
     await clickAt(page, await page.eval(caretPoint(firstLi)));
     await sleep(500);
-    await hotkey(page, "d");
+    await hotkeyToggle(page);
     await sleep(2200);
     ok(await page.eval(`!!document.querySelector('.mm-root .mm-node')`), "先把导图开起来");
 
@@ -464,7 +535,7 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
     ok(await page.eval(`!!document.querySelector('.mm-root .mm-node.mm-sel')`), "并且有一个选中的节点（复制有明确的作用对象，真出问题就会写进内核）");
 
     const beforeItems = (await kids(listA)).length;
-    await hotkey(page, "d");
+    await hotkeyToggle(page);
     await sleep(2400);
     const afterItems = (await kids(listA)).length;
     ok(afterItems === beforeItems, "★★ 内核列表项数不变 —— 没有被偷偷复制节点", `${beforeItems} → ${afterItems}`);
@@ -673,7 +744,7 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
         const multiBefore = await page.eval(`document.querySelectorAll('.mm-root .mm-node.mm-multi').length`);
         const itemsBefore = (await kids(listA)).length;
         const copiesBefore = await page.eval(`window.__mmCopies`);
-        /* ★ 必须用 `hotkeySingle`（单事件）。用 `hotkey`（补发裸修饰键）的话
+        /* ★ 必须用 `hotkeySingle`（单事件）。用 `hotkeyToggle`（补发裸修饰键）的话
            焦点会被踢出导图、插件根本收不到，三条断言会变成
            「因为没焦点所以什么都没发生」的假绿 —— 第一版就是这么翻的车。 */
         await hotkeySingle(page, k);

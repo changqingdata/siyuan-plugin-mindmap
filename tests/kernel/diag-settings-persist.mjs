@@ -105,6 +105,24 @@ try {
             return 'clicked';
         })()`);
         await sleep(1400);
+        // 面板现在是**侧边分区**的（见 core/settings-tabs.ts）。被操作的开关不一定在
+        // 默认分区里（「小地图」在「画布」），所以显式切到「装着它的那一区」。
+        //
+        // 不写死 tab 名、也不依赖「隐藏分区里的控件照样能程序化点击」：后者现在成立
+        // （非当前分区的行仍在 DOM 里，只是 display:none），但哪天有人把分区改成
+        // **只渲染当前分区**，写死的点击会静默失效 —— 那正是这个仓库反复踩过的形态。
+        await page.eval(`(() => {
+            const dlg = document.querySelector('.b3-dialog--open');
+            if (!dlg) return 'no-dialog';
+            const title = ${JSON.stringify(TOGGLE)};
+            const pane = [...dlg.querySelectorAll('.mm-set__pane')].find((p) =>
+                [...p.querySelectorAll('.config-name')].some((e) => (e.textContent || '').trim() === title));
+            if (!pane) return 'no-pane';   // 没有分区（旧版扁平列表）就不切
+            const tab = [...dlg.querySelectorAll('.mm-set__tab')].find((t) => t.dataset.group === pane.dataset.group);
+            if (tab) tab.click();
+            return 'switched';
+        })()`);
+        await sleep(300);
         return hit;
     };
     const clickAction = (re) =>

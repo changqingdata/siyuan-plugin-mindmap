@@ -853,15 +853,26 @@ console.log("[12] 诊断信息的收集与格式化");
     //「设置 → 快捷键」里看到的是 `Ctrl+Alt+D`（实测：思源主菜单里「魔法排版」
     // 显示 `Ctrl+Alt+P`，其 keymap 存值正是 `⌥⌘P`）。两套符号对不上。
 
+    /**
+     * 测试用的简写。
+     *
+     * `readableHotkey` 的第三个参数（空格标签）是**必传**的 —— 见
+     * `utils/hotkey.ts` 的说明：不给默认值，是为了让「调用点忘了传翻译」
+     * 变成编译错误，而不是让英文用户在界面上看到「空格」。
+     * 下面绝大多数用例的键位里没有空格，标签用不上；统一给个中文字面量，
+     * 免得每行都写一遍。**空格那条路径单独在下面显式验**。
+     */
+    const hk = (hotkey: string, isMac: boolean) => readableHotkey(hotkey, isMac, "空格");
+
     /* ---- macOS：原样保留思源表示法 ---- */
-    eq(readableHotkey("⌥⌘D", true), "⌥⌘D", "macOS 上原样保留（思源自己的表示法就是这个）");
-    eq(readableHotkey("⌘Z", true), "⌘Z", "macOS 上单修饰键也不动");
+    eq(hk("⌥⌘D", true), "⌥⌘D", "macOS 上原样保留（思源自己的表示法就是这个）");
+    eq(hk("⌘Z", true), "⌘Z", "macOS 上单修饰键也不动");
 
     /* ---- Windows / Linux：换算成 Ctrl / Alt / Shift ---- */
-    eq(readableHotkey("⌥⌘D", false), "Ctrl+Alt+D", "★ Windows 上 ⌥⌘D → Ctrl+Alt+D（与思源菜单的写法一致）");
-    eq(readableHotkey("⌥⌘V", false), "Ctrl+Alt+V", "★ 另一条同理");
-    eq(readableHotkey("⌘Z", false), "Ctrl+Z", "单 ⌘ → Ctrl");
-    eq(readableHotkey("⌥P", false), "Alt+P", "单 ⌥ → Alt（思源菜单里「设置」就是这么显示的）");
+    eq(hk("⌥⌘D", false), "Ctrl+Alt+D", "★ Windows 上 ⌥⌘D → Ctrl+Alt+D（与思源菜单的写法一致）");
+    eq(hk("⌥⌘V", false), "Ctrl+Alt+V", "★ 另一条同理");
+    eq(hk("⌘Z", false), "Ctrl+Z", "单 ⌘ → Ctrl");
+    eq(hk("⌥P", false), "Alt+P", "单 ⌥ → Alt（思源菜单里「设置」就是这么显示的）");
 
     /* ---- 顺序：Ctrl → Shift → Alt → 主键（照抄思源的规范顺序） ---- */
     // 顺序排错不会崩，但会造出第二套写法 —— 用户在思源设置页看到
@@ -870,19 +881,30 @@ console.log("[12] 诊断信息的收集与格式化");
     //   `⌥⌘P` → `Ctrl+Alt+P`    ⇒ Ctrl 在 Alt 前
     //   `⇧⌘F` → `Ctrl+Shift+F`  ⇒ Ctrl 在 Shift 前
     //   `⌥⇧P` → `Shift+Alt+P`   ⇒ Shift 在 Alt 前
-    eq(readableHotkey("⌥⌘P", false), "Ctrl+Alt+P", "★ 顺序 Ctrl 在 Alt 前（对齐思源菜单里的「魔法排版 Ctrl+Alt+P」）");
-    eq(readableHotkey("⇧⌘F", false), "Ctrl+Shift+F", "★ 顺序 Ctrl 在 Shift 前（对齐思源「固定搜索 Ctrl+Shift+F」）");
-    eq(readableHotkey("⌥⇧P", false), "Shift+Alt+P", "★★ 顺序 Shift 在 Alt 前（对齐思源「命令面板 Shift+Alt+P」）");
-    eq(readableHotkey("⌥⇧↓", false), "Shift+Alt+↓", "带方向键主键的组合同样成立");
+    eq(hk("⌥⌘P", false), "Ctrl+Alt+P", "★ 顺序 Ctrl 在 Alt 前（对齐思源菜单里的「魔法排版 Ctrl+Alt+P」）");
+    eq(hk("⇧⌘F", false), "Ctrl+Shift+F", "★ 顺序 Ctrl 在 Shift 前（对齐思源「固定搜索 Ctrl+Shift+F」）");
+    eq(hk("⌥⇧P", false), "Shift+Alt+P", "★★ 顺序 Shift 在 Alt 前（对齐思源「命令面板 Shift+Alt+P」）");
+    eq(hk("⌥⇧↓", false), "Shift+Alt+↓", "带方向键主键的组合同样成立");
 
     /* ---- 主键不被吞掉 ---- */
-    eq(readableHotkey("F2", false), "F2", "没有修饰键时原样返回（不能被换算吃掉）");
-    eq(readableHotkey("⌘\\", false), "Ctrl+\\", "反斜杠这类主键也要留下来");
-    eq(readableHotkey("", false), "", "空串返回空串（迁移命令故意不绑键，不能变成 Ctrl+）");
+    eq(hk("F2", false), "F2", "没有修饰键时原样返回（不能被换算吃掉）");
+    eq(hk("⌘\\", false), "Ctrl+\\", "反斜杠这类主键也要留下来");
+    eq(hk("", false), "", "空串返回空串（迁移命令故意不绑键，不能变成 Ctrl+）");
 
     /* ---- 幂等：换算过的串再换算不该变样 ---- */
     // 防的是「已经显示成 Ctrl+Alt+D 了又被换算一遍」这类重复加工。
-    eq(readableHotkey(readableHotkey("⌥⌘D", false), false), "Ctrl+Alt+D", "换算过的串再算一次结果不变");
+    eq(hk(hk("⌥⌘D", false), false), "Ctrl+Alt+D", "换算过的串再算一次结果不变");
+
+    /* ---- ★ 空格：思源表示法里它是一个**字面空格**，不是符号 ---- */
+    // `KEYCODELIST[32] = " "` ⇒ `Ctrl+空格` 在 conf.json 里存的就是 `"⌘ "`。
+    // 直接拼出来是 `Ctrl+ ` —— 一个看不见的尾随空格，用户读不出该按什么。
+    // 所以第三个参数（标签）必须真的被用上，且**两个平台都要换**（macOS 那边
+    // 同样显示成 `⌘ `，一样不可见）。
+    eq(readableHotkey("⌘ ", false, "空格"), "Ctrl+空格", "★ Windows：⌘␣ → Ctrl+空格（不是 Ctrl+␣）");
+    eq(readableHotkey("⌘ ", true, "空格"), "⌘空格", "★ macOS：⌘␣ 里的空格同样要换成可见标签");
+    eq(readableHotkey("⌘ ", false, "Space"), "Ctrl+Space", "★ 标签来自调用方（英文界面传 Space）");
+    eq(readableHotkey("⌥ ", false, "空格"), "Alt+空格", "★ 另一条全局快捷键（Alt+空格）同理");
+    eq(readableHotkey("⌘ ", false, "空格").trim(), readableHotkey("⌘ ", false, "空格"), "★ 换算后**没有尾随空白**（这正是要修的那个毛病）");
 }
 
 /* ------------------------------------------------------------------ 汇总 */

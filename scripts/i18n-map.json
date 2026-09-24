@@ -1,6 +1,8 @@
 {
   "大纲导图": "pluginName",
-  "大纲视图（关闭导图）": "menuOutline",
+  "大纲模式（关闭导图）": "mode.outline",
+  "导图模式": "mode.map",
+  "并排模式（大纲 + 导图）": "mode.side",
   "复制诊断信息": "copyDiagnostics",
 
   "本图": "search.scopeHere",

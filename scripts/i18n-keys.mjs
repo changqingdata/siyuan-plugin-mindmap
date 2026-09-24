@@ -62,8 +62,14 @@ const DYNAMIC_SOURCES = [
 /**
  * 键名**直接写在数据里**的常量表：`[["shortcut.nav", "中文"], …]`。
  * 与上面那批的区别是不用拼前缀 —— 键就是数据的第一项，读出来直接用。
+ *
+ * ⚠️ 快捷键速查已从 `index.ts` 的 `SHORTCUT_HELP`（12 条长句）搬到
+ * `core/shortcuts.ts` 的 `SHORTCUT_KEYS`（分组 + 行）。改的是**位置与形状**，
+ * 不是机制：仍然是 `[键, 中文兜底]` 的扁平数组，所以这个读取器一行没动。
+ * 分组结构 `SHORTCUT_GROUPS` 只写键名、不写兜底，**审计不读它** ——
+ * 两份靠键名对齐，加行时两边都要动。
  */
-const KEYED_PAIRS = [["src/index.ts", "SHORTCUT_HELP"]];
+const KEYED_PAIRS = [["src/core/shortcuts.ts", "SHORTCUT_KEYS"]];
 
 /** 取 `const NAME = { key: "值" }` 形式的常量表 */
 function readRecord(file, name) {

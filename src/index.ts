@@ -9,15 +9,41 @@ import { copyText, getKernelVersion, searchDocOutline, setBlockAttrs } from "./u
 import { isMacPlatform, readableHotkey } from "./utils/hotkey";
 import { formatNotes, installDiagnostics, stamp } from "./core/diagnostics";
 import { THEME_LIST } from "./core/theme";
+import { SHORTCUT_FALLBACK, SHORTCUT_GROUPS } from "./core/shortcuts";
+import { layoutSettingTabs } from "./core/settings-tabs";
+import type { SetGroupId, SetTabMeta } from "./core/settings-tabs";
 
 /**
  * 两条全局命令的默认键位，用**思源自己的表示法**（macOS 字形，与 `conf.json` 一致）。
  *
  * ⚠️ 声明（`addCommand` 的 `hotkey`）与说明文字（快捷键速查）必须**共用这两个常量**。
  * 分开写迟早会漂移：改了绑定忘了改说明，用户按文档去按、按不动。
+ *
+ * ## 空格为什么写成「一个尾随空格」
+ *
+ * 思源的键位表里 **`KEYCODELIST[32] = " "`** —— 空格就是**一个字面空格字符**。
+ * 所以 `Ctrl+空格` 的键位串是 `"⌘ "`（⌘ 后跟一个空格），**不是** `"⌘Space"`。
+ * 三处互证（都读自思源 3.8.4 的前端产物，不是猜的）：
+ *
+ *  1. 前端键位记录器（设置 → 快捷键 里按下键时走的那段）：
+ *     `nt += Constants.KEYCODELIST[Je.keyCode] || (Je.key.length>1 ? Je.key : Je.key.toUpperCase())`
+ *     —— keyCode 32 → `" "`；
+ *  2. 前端匹配器 `matchHotKey`：把主键部分**直接**与 `KEYCODELIST[keyCode]` 比，也是 `" "`；
+ *  3. `resources/app/electron/main.js` 的 `hotKey2Electron` 最后一步
+ *     `.replace(" ", "Space")` —— 它把字面空格翻成 Electron 的 `Space`。
+ *
+ * ⚠️ **键位合法性**：思源会过滤插件声明的键位（`ignoredHotkeys`）。
+ * 判据是含 `⌃`/`⌥`/`⌘` 前缀的**一律放行**，不含修饰键的裸单字符（如 `D`）才会被清空 ——
+ * 所以 `"⌘ "` 与 `"⌥ "` 都能正常绑定，不会被吃掉。
+ *
+ * ⚠️ **平台冲突**（用户可见，别当成实现细节）：
+ *  · `Ctrl + 空格` 是**中文输入法切换中英文**的默认热键（微软拼音 / 搜狗），
+ *    输入法在系统层就把它截走了，插件未必收得到；
+ *  · `Alt + 空格` 是 **Windows 的窗口系统菜单**快捷键。
+ *  两条都在「设置 → 快捷键」里可改，这里只是默认值。
  */
-const HOTKEY_TOGGLE = "⌥⌘D";
-const HOTKEY_SIDE = "⌥⌘V";
+const HOTKEY_TOGGLE = "⌘ ";
+const HOTKEY_SIDE = "⌥ ";
 
 const LAYOUT_OPTIONS: Record<MMLayout, string> = {
     logic: "逻辑结构图",
@@ -31,35 +57,14 @@ const EDGE_OPTIONS: Record<MMEdgeStyle, string> = {
     straight: "直线",
 };
 
-/**
- * 设置面板里的快捷键速查。
+/*
+ * 快捷键速查的**数据**搬去了 `core/shortcuts.ts`。
  *
- * 每行配一个**语义键**，而不是 `shortcut.0`…`shortcut.13` 这样的下标键 ——
- * 下标键在中间插一行时，后面所有译文会整体错位，而且错得很安静：
- * 界面上依旧是一句通顺的英文，只是内容和行对不上了，中英文都不报错。
- *
- * 第一项是键名，第二项是内置中文（词表取不到时的兜底）。
- * 空行用 `["", ""]` 占位 —— 它分隔「图内」与「全局」两组，本身没有文案。
+ * 老实现是这里的 `SHORTCUT_HELP`：12 条长句，每句把一组键位用 ` · ` 串起来，
+ * 再拿 `showMessage` 弹一条 12 秒的通知。那条通知有三个毛病叠在一起 ——
+ * 会自己消失、一条长句读不出「哪个键对应哪个作用」、换行位置取决于窗口宽度。
+ * 现在改成「分组 + 行」的数据结构，由 `openShortcutHelp()` 渲染成表格对话框。
  */
-const SHORTCUT_HELP: Array<[string, string]> = [
-    ["shortcut.nav", "导航：↑↓ 同级 · ← 父节点 · → 第一个子节点 · Home/End 首尾 · 空格 折叠"],
-    ["shortcut.edit", "编辑：Tab 子节点 · Shift+Tab 降级 · Enter 同级 · F2 改名 · Delete/Backspace 删除 · Alt+←/→ 升降级 · Ctrl+↑/↓ 上下移"],
-    ["shortcut.todo", "待办：X 勾选 / 取消勾选选中的待办节点（也可以直接点节点上的复选框）"],
-    ["shortcut.mark", "标记：右键节点 →「添加标记」，可挂图标 / 标签 / 自定义色；存在块属性里，复制块、导出、换设备都跟着走"],
-    ["shortcut.clip", "剪贴：Ctrl+C 复制子树 · Ctrl+V 粘贴为子节点 · Ctrl+X 剪切 · Ctrl+D 快速复制"],
-    ["shortcut.view", "视图：Ctrl+= / Ctrl+- 缩放 · Ctrl+0 适应画布 · Ctrl+1 回到 100% · Ctrl+F 搜索 · F 全屏 · Esc 退出"],
-    ["shortcut.search", "搜索：Ctrl+F 打开搜索框；框里的「本图 / 全文档」切换范围 —— 全文档会在本文档所有导图里找，结果点一下就跳过去"],
-    ["shortcut.filter", "过滤：工具条上的「全部 / 未完成 / 已完成」只看某一类待办（图里没有待办时这一组会自动收起）"],
-    ["shortcut.focus", "聚焦：Ctrl/⌘ + 双击节点（或右键菜单「聚焦此分支」）只看这一个分支，Esc 逐层返回"],
-    ["shortcut.multi", "多选：Shift + 拖动框选 · Ctrl + 单击加选 · Ctrl+A 全选同级（再按一次选中整棵树）；选中 2 个以上会浮出批量操作条（升级 / 降级 / 折叠 / 待办完成 / 导出 / 删除）"],
-    ["shortcut.present", "演示：工具条上的 ▶ 进入演示模式，→ / 空格 / PageDown 推进、← / PageUp 回退、Esc 退出（不修改文档内容）"],
-    ["", ""],
-    ["shortcut.globalTitle", "全局（在文档任意位置都生效，可在「设置 → 快捷键」里改）："],
-    // 键位用占位符，由 `shortcutHelp()` 按平台填入 —— 写死 `⌥⌘D` 的话，
-    // Windows 用户看到的是一套在自己「设置 → 快捷键」里找不到的符号
-    //（思源自己的菜单在 Windows 上显示的是 `Ctrl+Alt+D`）。
-    ["shortcut.global", "{toggle} 把光标所在的列表切换为导图 / 大纲 · {side} 并排面板打开导图"],
-];
 
 /** 从块菜单点击到的元素反推出所属的列表块 */
 function resolveListBlock(el: HTMLElement | undefined): HTMLElement | null {
@@ -92,10 +97,37 @@ function outermostList(start: HTMLElement | null): HTMLElement | null {
     return list;
 }
 
+/**
+ * 转义要拼进 `innerHTML` 的文本。
+ *
+ * 现在只有「快捷键速查」对话框在拼 HTML（思源 `Dialog` 的 `content` 只收字符串）。
+ * 内容全部来自我们自己的词表，理论上没有注入面 —— 但词表是可以被**翻译者**
+ * 改的，而 `&` `<` `>` 在译文里完全合法（比如「上一级 < 下一级」）。
+ * 不转义的话，一句译文就能把对话框结构拆掉。
+ */
+function escHtml(s: string): string {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * 下一帧再执行。用于「等思源把设置面板渲染出来」这类**必须重试**的场合。
+ *
+ * 包一层而不是直接写 `requestAnimationFrame`：单测跑在 `tests/run.mjs` 的
+ * 极简 DOM 模拟里，那里没有 `window` / `requestAnimationFrame`。虽然测试不会
+ * 走到 `openSetting()`，但**引用一个不存在的全局**在打包后是运行时才炸的坑，
+ * 留个兜底比事后排查便宜。
+ */
+function nextFrame(fn: () => void): void {
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => fn());
+    else setTimeout(fn, 16);
+}
+
 export default class MindMapPlugin extends Plugin {
     private config: MMConfig = { ...DEFAULT_CONFIG };
     private scanner!: Scanner;
     private dialog: Dialog | null = null;
+    /** 「查看快捷键」的对话框。它是只读的，但同样要在卸载时销毁 */
+    private helpDialog: Dialog | null = null;
     private sidePanel: HTMLElement | null = null;
     private sideView: MindMapView | null = null;
 
@@ -135,6 +167,8 @@ export default class MindMapPlugin extends Plugin {
         this.closeSide();
         this.dialog?.destroy();
         this.dialog = null;
+        this.helpDialog?.destroy();
+        this.helpDialog = null;
     }
 
     /* ================================================================ 块菜单 */
@@ -201,20 +235,78 @@ export default class MindMapPlugin extends Plugin {
     }
 
     /**
-     * 快捷键速查的正文。
+     * 「查看快捷键」—— 弹一个**分组表格**对话框。
      *
-     * 键与中文都写在模块级常量里，所以取值只能在类内做 —— 这里是唯一的消费点。
-     * 空行（`["", ""]`）原样保留，不查词表。
+     * ## 为什么不再用通知
      *
-     * 全局那两条的键位走占位符：思源的表示法是 macOS 字形，得按平台换算
-     *（思源自己的菜单在 Windows 上显示的是 `Ctrl+Alt+D`）。
+     * 老实现是 `showMessage(shortcutHelp(), 12000)`：一条 12 秒后自己消失的通知，
+     * 四十多个键位挤在 12 条长句里。三个问题叠在一起：
+     *
+     *  1. **会自己消失** —— 用户想对着按的时候通知已经没了；
+     *  2. **一条长句读不出「哪个键对应哪个作用」** ——
+     *     `↑↓ 同级 · ← 父节点 · → 第一个子节点` 里分隔符和键位混在一起；
+     *  3. **换行位置取决于窗口宽度** —— 折在哪跟语义无关。
+     *
+     * 现在渲染成「分组标题 + 每行『键位 | 作用』两列」。键位单独成列、等宽字体，
+     * 扫一眼就能定位。
+     *
+     * ⚠️ 键位里的空格走 `{space}` 占位符：思源表示法里它就是**一个字面空格**
+     * （`KEYCODELIST[32] = " "`），直接拼出来会变成看不见的 `Ctrl+ `。
+     * 详见 `utils/hotkey.ts` 的 `readableHotkey`。
      */
-    private shortcutHelp(): string {
-        const vars = {
-            toggle: readableHotkey(HOTKEY_TOGGLE, isMacPlatform()),
-            side: readableHotkey(HOTKEY_SIDE, isMacPlatform()),
+    private openShortcutHelp() {
+        const isMac = isMacPlatform();
+        const space = this.t("key.space", "空格");
+        const vars: Record<string, string> = {
+            space,
+            toggle: readableHotkey(HOTKEY_TOGGLE, isMac, space),
+            side: readableHotkey(HOTKEY_SIDE, isMac, space),
         };
-        return SHORTCUT_HELP.map(([key, zh]) => (zh ? this.t(key, zh, vars) : "")).join("\n");
+        const fill = (s: string) => {
+            let out = s;
+            for (const [k, v] of Object.entries(vars)) out = out.split(`{${k}}`).join(v);
+            return out;
+        };
+        /** 取词：词表优先，取不到退回 `SHORTCUT_KEYS` 里的中文兜底 */
+        const tr = (key: string) => this.t(key, SHORTCUT_FALLBACK[key] ?? key);
+
+        const groups = SHORTCUT_GROUPS.map((g) => {
+            const rows = g.rows
+                .map((r) => {
+                    const label = fill(r.k);
+                    // 没有键位的行（点复选框 / 工具条按钮 / 右键菜单）——
+                    // 留空会让人以为「这里漏了」，所以显式写「菜单操作」并置灰。
+                    const keyCell = label
+                        ? `<kbd class="mm-sc__key">${escHtml(label)}</kbd>`
+                        : `<kbd class="mm-sc__key mm-sc__key--none">${escHtml(tr("sc.none"))}</kbd>`;
+                    return `<div class="mm-sc__row">${keyCell}<div class="mm-sc__what">${escHtml(tr(r.d))}</div></div>`;
+                })
+                .join("");
+            const note = g.note ? `<span class="mm-sc__note">${escHtml(tr(g.note))}</span>` : "";
+            return `<section class="mm-sc__group">
+    <div class="mm-sc__head">${escHtml(tr(g.t))}${note}</div>
+    <div class="mm-sc__rows">${rows}</div>
+</section>`;
+        }).join("");
+
+        const dialog = new Dialog({
+            // ⚠️ 这里**故意不用模板串**：`i18n-audit.mjs` 是按 TS AST 扫的，一个
+            // TemplateExpression 只要整体含汉字就整条报「没接 i18n」—— 哪怕汉字
+            // 只是 `t()` 的兜底值（`${t("k", "中文")}` 这种写法照样报）。
+            // 用 `+` 拼就没有这个假阳性，`t()` 里的兜底值也仍会被归到 dev 类。
+            title: this.t("pluginName", "大纲导图") + " · " + tr("sc.dlgTitle"),
+            content: `<div class="b3-dialog__content mm-sc">
+    <div class="mm-sc__hint">${escHtml(tr("sc.dlgHint"))}</div>
+    <div class="mm-sc__legend"><span>${escHtml(tr("sc.colKey"))}</span><span>${escHtml(tr("sc.colWhat"))}</span></div>
+    ${groups}
+</div>`,
+            width: "680px",
+            height: "80vh",
+        });
+        // 快捷键速查是**只读**的：没有确认/取消语义，关掉就是关掉。
+        // 这里只是把它记下来，便于 `onunload` 时统一销毁（否则卸载后对话框会留在页面上）。
+        this.helpDialog?.destroy();
+        this.helpDialog = dialog;
     }
 
     /* ================================================================ 顶栏入口 */
@@ -387,47 +479,60 @@ export default class MindMapPlugin extends Plugin {
         }
     }
 
+    /**
+     * 块图标菜单里的「大纲导图」子菜单 —— **三种模式**，不是「一个大纲 + 三个布局」。
+     *
+     * ## 为什么把三个布局项从菜单里撤掉
+     *
+     * 老菜单是「大纲视图 / 逻辑结构图 / 思维导图 / 树状图 / 并排查看」五项平铺 ——
+     * 五个选项**不是同一个层级的东西**：第一个是「要不要导图」，后三个是
+     * 「导图长什么样」。平铺在一起，用户要先想清楚「我现在是想关掉导图，
+     * 还是想换个布局」，而这两件事的入口本该在不同地方。
+     *
+     * 现在：菜单只回答「要不要导图、要不要并排」；**布局在导图自己的工具条上切换**
+     *（`renderer.ts` 的 `buildToolbar()`，`.mm-seg` 那三个按钮）——
+     * 那儿才是「导图长什么样」该待的地方，改完立刻看得到效果。
+     *
+     * ## ⚠️ 「导图模式」在已处于导图模式时**不重设布局**
+     *
+     * 否则会把手动切到「思维导图 / 树状图」的用户，按一下菜单就被打回默认布局 ——
+     * 一个看起来无害、实际会吃掉用户选择的动作。菜单项的 `checked` 已经表达了
+     *「你现在就在导图模式」，所以这一项此时只是个状态指示。
+     */
     private buildBlockMenu(menu: subMenu, list: HTMLElement | null) {
         const current = list?.getAttribute(ATTR_VIEW) ?? null;
         const disabled = !list;
+        const sideOn = !!list && this.scanner.sideListId !== "" && this.scanner.sideListId === list.dataset.nodeId;
 
         const items: IMenu[] = [
             {
-                label: this.t("menuOutline", "大纲视图（关闭导图）"),
+                label: this.t("mode.outline", "大纲模式（关闭导图）"),
                 checked: current === null,
                 disabled,
                 click: () => {
                     if (list) void this.applyView(list, null);
                 },
             },
-            { type: "separator" },
-        ];
-
-        for (const [key, fallback] of Object.entries(LAYOUT_OPTIONS) as Array<[MMLayout, string]>) {
-            // 布局名走 i18n（键名约定：layout.<值>，如 logic → layout.logic）
-            const label = this.t(`layout.${key}`, fallback);
-            items.push({
-                label,
-                checked: current === key,
+            {
+                label: this.t("mode.map", "导图模式"),
+                checked: current !== null,
                 disabled,
                 click: () => {
-                    if (list) void this.applyView(list, key);
+                    if (list) void this.enterMapMode(list, current);
                 },
-            });
-        }
-
-        items.push({ type: "separator" });
-        items.push({
-            label: this.t("ui.sideBySide", "并排查看（大纲 + 导图）"),
-            checked: this.scanner.sideListId !== "" && this.scanner.sideListId === list?.dataset.nodeId,
-            disabled,
-            click: () => {
-                if (!list) return;
-                // 点的是同一个块就关掉，否则换到这块
-                if (this.scanner.sideListId === list.dataset.nodeId) this.closeSide();
-                else this.openSide(list);
             },
-        });
+            {
+                label: this.t("mode.side", "并排模式（大纲 + 导图）"),
+                checked: sideOn,
+                disabled,
+                click: () => {
+                    if (!list) return;
+                    // 点的是同一个块就关掉，否则换到这块
+                    if (this.scanner.sideListId === list.dataset.nodeId) this.closeSide();
+                    else this.openSide(list);
+                },
+            },
+        ];
 
         menu.addItem({
             icon: "iconList",
@@ -435,6 +540,18 @@ export default class MindMapPlugin extends Plugin {
             type: "submenu",
             submenu: items,
         });
+    }
+
+    /**
+     * 进入导图模式。
+     *
+     * 已经在大纲模式（`current === null`）时才落默认布局 ——
+     * 默认布局取 `config.layout`（出厂值 `logic`，也就是「逻辑结构图」）。
+     * 已在导图模式则**原样返回**，理由见 `buildBlockMenu` 的注释。
+     */
+    private async enterMapMode(list: HTMLElement, current: string | null) {
+        if (current !== null) return;
+        await this.applyView(list, this.config.layout);
     }
 
     private async applyView(list: HTMLElement, layout: MMLayout | null) {
@@ -704,6 +821,10 @@ export default class MindMapPlugin extends Plugin {
          */
         const draft: MMConfig = { ...this.config };
         const setting = new Setting({
+            // 侧边选项卡要的是「左边一列 + 右边一列」，窄了会把设置项挤成两行。
+            // 高度给 vh 而不是固定 px：小屏笔记本上固定 700px 会顶出屏幕。
+            height: "70vh",
+            width: "760px",
             confirmCallback: () => {
                 this.config = { ...draft };
                 void this.saveConfig();
@@ -711,13 +832,25 @@ export default class MindMapPlugin extends Plugin {
             },
         });
 
+        /**
+         * 每条设置项属于哪一组。**顺序与 `addItem` 的调用顺序严格一一对应** ——
+         * `layoutSettingTabs()` 就是靠这个下标把行搬进对应 pane 的。
+         *
+         * ⚠️ 所以分组是**每个 add* 的第一个参数**、由这里 `push` 进去，而不是
+         * 在某个地方写一句 `curGroup = "xxx"` 的隐式状态：漏传参数 TypeScript
+         * 当场报错，而漏改状态只会在运行时静默归错组。
+         */
+        const groupOf: SetGroupId[] = [];
+
         const addSelect = (
+            group: SetGroupId,
             title: string,
             description: string,
             options: Record<string, string>,
             value: string,
             changed: (v: string) => void,
         ) => {
+            groupOf.push(group);
             setting.addItem({
                 title,
                 description,
@@ -737,7 +870,14 @@ export default class MindMapPlugin extends Plugin {
             });
         };
 
-        const addToggle = (title: string, description: string, value: boolean, changed: (v: boolean) => void) => {
+        const addToggle = (
+            group: SetGroupId,
+            title: string,
+            description: string,
+            value: boolean,
+            changed: (v: boolean) => void,
+        ) => {
+            groupOf.push(group);
             setting.addItem({
                 title,
                 description,
@@ -753,7 +893,8 @@ export default class MindMapPlugin extends Plugin {
         };
 
         /** 纯说明条目（没有可操作的控件）—— 用于交代「这个行为已经由内核保证，不需要你选」 */
-        const addHint = (title: string, description: string) => {
+        const addHint = (group: SetGroupId, title: string, description: string) => {
+            groupOf.push(group);
             setting.addItem({
                 title,
                 description,
@@ -767,6 +908,7 @@ export default class MindMapPlugin extends Plugin {
         };
 
         const addNumber = (
+            group: SetGroupId,
             title: string,
             description: string,
             value: number,
@@ -774,6 +916,7 @@ export default class MindMapPlugin extends Plugin {
             max: number,
             changed: (v: number) => void,
         ) => {
+            groupOf.push(group);
             setting.addItem({
                 title,
                 description,
@@ -798,7 +941,14 @@ export default class MindMapPlugin extends Plugin {
             });
         };
 
-        const addText = (title: string, description: string, value: string, changed: (v: string) => void) => {
+        const addText = (
+            group: SetGroupId,
+            title: string,
+            description: string,
+            value: string,
+            changed: (v: string) => void,
+        ) => {
+            groupOf.push(group);
             setting.addItem({
                 title,
                 description,
@@ -814,15 +964,76 @@ export default class MindMapPlugin extends Plugin {
             });
         };
 
-        addSelect(this.t("set.defaultLayout", "默认布局"), this.t("set.defaultLayoutDesc", "在块菜单中启用导图时使用的默认结构"), this.localize(LAYOUT_OPTIONS, "layout"), this.config.layout, (v) => {
-            draft.layout = v as MMLayout;
-        });
+        /**
+         * 右侧是按钮的设置项。
+         *
+         * 原来「查看快捷键」「复制诊断信息」「迁移」三处各写一遍同样的
+         * `addItem({ …, createActionElement: () => { const btn = … } })` ——
+         * 三份逐字重复的样板，只有文案和回调不同。收成一个之后，分组参数
+         * 也只需要在一处维护。
+         */
+        const addButton = (
+            group: SetGroupId,
+            title: string,
+            description: string,
+            label: string,
+            onclick: (btn: HTMLButtonElement) => void,
+        ) => {
+            groupOf.push(group);
+            setting.addItem({
+                title,
+                description,
+                createActionElement: () => {
+                    const btn = document.createElement("button");
+                    btn.type = "button";
+                    btn.className = "b3-button b3-button--outline fn__size200";
+                    btn.textContent = label;
+                    btn.onclick = () => onclick(btn);
+                    return btn;
+                },
+            });
+        };
 
-        addSelect(this.t("ui.edgeStyle", "连线样式"), this.t("set.edgeStyleDesc", "节点之间的连接线形态"), this.localize(EDGE_OPTIONS, "edge"), this.config.edge, (v) => {
-            draft.edge = v as MMEdgeStyle;
-        });
+        /**
+         * 选项卡定义。文案在这里用 `this.t()` 就地取 —— 不放进常量表，
+         * 是因为 `scripts/i18n-keys.mjs` 扫的是**代码里的 `t()` 调用**，
+         * 放进表里就得再加一套读取器，而这里只有 5 条。
+         */
+        const tabs: SetTabMeta[] = [
+            {
+                id: "appearance",
+                title: this.t("set.tabAppearance", "外观"),
+                desc: this.t("set.tabAppearanceDesc", "主题、配色、连线与布局 —— 决定导图长什么样。"),
+            },
+            {
+                id: "canvas",
+                title: this.t("set.tabCanvas", "画布"),
+                desc: this.t("set.tabCanvasDesc", "画布多高、要不要自适应、小地图怎么显示。"),
+            },
+            {
+                id: "interact",
+                title: this.t("set.tabInteract", "交互"),
+                desc: this.t("set.tabInteractDesc", "鼠标与键盘怎么操作导图，以及视图偏好记在哪。"),
+            },
+            {
+                id: "perf",
+                title: this.t("set.tabPerf", "性能"),
+                desc: this.t("set.tabPerfDesc", "节点很多时的渲染策略与上限。"),
+            },
+            {
+                id: "help",
+                title: this.t("set.tabHelp", "帮助"),
+                desc: this.t("set.tabHelpDesc", "快捷键速查、诊断信息与迁移工具。"),
+            },
+        ];
+
+        /* ════════════════════════════════════════════════ 外观
+         *
+         * 这一组回答「导图长什么样」：配色、连线、布局、编号。
+         * 顺序即选项卡里的顺序 —— 由「最常改的」排到「偶尔才动的」。 */
 
         addSelect(
+            "appearance",
             this.t("ui.theme", "主题"),
             this.t("set.themeDesc", "「跟随思源」会使用思源当前配色，其余为内置独立配色"),
             Object.fromEntries(THEME_LIST.map((th) => [th.id, this.t(`theme.${th.id}`, th.name)])),
@@ -832,36 +1043,86 @@ export default class MindMapPlugin extends Plugin {
             },
         );
 
-        addToggle(this.t("set.showLevel", "显示层级编号"), this.t("set.showLevelDesc", "有序列表显示 1.2.1 形式的层级编号"), this.config.showOrder, (v) => {
-            draft.showOrder = v;
-        });
-
-        addToggle(this.t("ui.branchColor", "分支配色"), this.t("set.branchColorDesc", "每个一级分支使用不同色系，子节点继承"), this.config.branchColor, (v) => {
-            draft.branchColor = v;
-        });
-
-        addToggle(this.t("set.compact", "紧凑模式"), this.t("set.compactDesc", "缩小节点间距，适合节点较多的导图"), this.config.compact, (v) => {
-            draft.compact = v;
-        });
-
-        addToggle(this.t("set.ctrlWheel", "Ctrl + 滚轮缩放"), this.t("set.ctrlWheelDesc", "按住 Ctrl（macOS 为 ⌘）滚动鼠标可缩放导图"), this.config.ctrlWheelZoom, (v) => {
-            draft.ctrlWheelZoom = v;
-        });
-
-        addToggle(this.t("set.wheelPan", "滚轮平移导图"), this.t("set.wheelPanDesc", "开启后滚轮直接平移导图；关闭时滚轮用于滚动页面"), this.config.wheelPan, (v) => {
-            draft.wheelPan = v;
-        });
-
-        addHint(
-            this.t("set.foldSync", "折叠状态与大纲同步"),
-            this.t("set.foldSyncDesc", "导图的折叠状态就是思源原生的列表折叠：在大纲里折一个节点，导图立刻跟着折；在导图上折一个节点，大纲也会跟着折。它随文档一起保存，所以离开时什么状态、下次进来就是什么状态。"),
+        addSelect(
+            "appearance",
+            this.t("set.defaultLayout", "默认布局"),
+            this.t("set.defaultLayoutDesc", "在块菜单中启用导图时使用的默认结构"),
+            this.localize(LAYOUT_OPTIONS, "layout"),
+            this.config.layout,
+            (v) => {
+                draft.layout = v as MMLayout;
+            },
         );
 
-        addToggle(this.t("set.autoFit", "自动适应画布"), this.t("set.autoFitDesc", "渲染完成后自动缩放到刚好铺满可视区"), this.config.autoFit, (v) => {
-            draft.autoFit = v;
-        });
+        addSelect(
+            "appearance",
+            this.t("ui.edgeStyle", "连线样式"),
+            this.t("set.edgeStyleDesc", "节点之间的连接线形态"),
+            this.localize(EDGE_OPTIONS, "edge"),
+            this.config.edge,
+            (v) => {
+                draft.edge = v as MMEdgeStyle;
+            },
+        );
+
+        addToggle(
+            "appearance",
+            this.t("ui.branchColor", "分支配色"),
+            this.t("set.branchColorDesc", "每个一级分支使用不同色系，子节点继承"),
+            this.config.branchColor,
+            (v) => {
+                draft.branchColor = v;
+            },
+        );
+
+        addText(
+            "appearance",
+            this.t("set.customColors", "自定义一级分支配色"),
+            this.t("set.customColorsDesc", "逗号分隔的十六进制颜色，按顺序分配给一级分支，超出部分循环取用。留空表示用主题自带色板。"),
+            this.config.customPalette,
+            (v) => {
+                draft.customPalette = v;
+            },
+        );
+
+        addToggle(
+            "appearance",
+            this.t("set.showLevel", "显示层级编号"),
+            this.t("set.showLevelDesc", "有序列表显示 1.2.1 形式的层级编号"),
+            this.config.showOrder,
+            (v) => {
+                draft.showOrder = v;
+            },
+        );
+
+        addToggle(
+            "appearance",
+            this.t("set.compact", "紧凑模式"),
+            this.t("set.compactDesc", "缩小节点间距，适合节点较多的导图"),
+            this.config.compact,
+            (v) => {
+                draft.compact = v;
+            },
+        );
+
+        addToggle(
+            "appearance",
+            this.t("set.flipAnimation", "布局动效"),
+            this.t("set.flipAnimationDesc", "结构变化时节点滑动到新位置，而不是瞬间跳过去"),
+            this.config.flipAnimation,
+            (v) => {
+                draft.flipAnimation = v;
+            },
+        );
+
+        /* ════════════════════════════════════════════════ 画布
+         *
+         * 这一组回答「画布多大、看得见多少」。
+         * 「画布高度」与「画布高度（px）」必须挨着：后者是前者的参数，
+         * 中间插别的东西会让人读不出两者的关系。 */
 
         addSelect(
+            "canvas",
             this.t("set.canvasHeightMode", "画布高度"),
             this.t("set.canvasHeightModeDesc", "行内导图的高度同时决定「看得见多少」和「这篇文档要多滚几屏」，所以给了三种取法：自适应内容会跟着节点多少长高；固定高度始终一样；铺满可用高度用满编辑器可视区。"),
             {
@@ -876,6 +1137,7 @@ export default class MindMapPlugin extends Plugin {
         );
 
         addNumber(
+            "canvas",
             this.t("set.canvasHeight", "画布高度（px）"),
             this.t("set.canvasHeightDesc", "「自适应内容」下这是最小高度（节点少时也留这么高），「固定高度」下就是它本身的高度；「铺满可用高度」忽略此项。"),
             this.config.canvasHeight,
@@ -887,6 +1149,17 @@ export default class MindMapPlugin extends Plugin {
         );
 
         addToggle(
+            "canvas",
+            this.t("set.autoFit", "自动适应画布"),
+            this.t("set.autoFitDesc", "渲染完成后自动缩放到刚好铺满可视区"),
+            this.config.autoFit,
+            (v) => {
+                draft.autoFit = v;
+            },
+        );
+
+        addToggle(
+            "canvas",
             this.t("set.autoColumns", "逻辑图自动分列"),
             this.t("set.autoColumnsDesc", "逻辑结构图的层级是纵向排列的，节点一多画布会变成细长条、横向空间全部闲置。开启后单列过高时自动把一级分支摊成多列。"),
             this.config.columnLayout,
@@ -895,39 +1168,21 @@ export default class MindMapPlugin extends Plugin {
             },
         );
 
-        addToggle(this.t("set.dblclickEdit", "双击编辑节点"), this.t("set.dblclickEditDesc", "双击节点直接改名，回车提交、Esc 取消，改动会写回思源"), this.config.editable, (v) => {
-            draft.editable = v;
-        });
-
-        addToggle(this.t("set.dragNode", "拖拽调整节点"), this.t("set.dragNodeDesc", "按住节点拖动可调整顺序与层级：落在节点上下缘成为同级，落在中间成为子节点"), this.config.draggable, (v) => {
-            draft.draggable = v;
-        });
-
-        addToggle(this.t("set.lazyRender", "懒渲染"), this.t("set.lazyRenderDesc", "列表块进入视口附近才渲染，长文档滚动更流畅"), this.config.lazyRender, (v) => {
-            draft.lazyRender = v;
-        });
-
         addToggle(
-            this.t("set.keyboard", "导图内快捷键"),
-            this.t("set.keyboardDesc", "导图获得焦点时接管键盘（方向键导航、Tab 加子节点、Enter 加同级、F2 改名等）。如果和思源的快捷键冲突，可以关掉它。"),
-            this.config.keyboard,
+            "canvas",
+            this.t("ui.minimap", "小地图"),
+            this.t("set.minimapDesc", "在右下角显示缩略图，可点击跳转"),
+            this.config.minimap,
             (v) => {
-                draft.keyboard = v;
+                draft.minimap = v;
             },
         );
-
-        addToggle(this.t("set.flipAnimation", "布局动效"), this.t("set.flipAnimationDesc", "结构变化时节点滑动到新位置，而不是瞬间跳过去"), this.config.flipAnimation, (v) => {
-            draft.flipAnimation = v;
-        });
-
-        addToggle(this.t("ui.minimap", "小地图"), this.t("set.minimapDesc", "在右下角显示缩略图，可点击跳转"), this.config.minimap, (v) => {
-            draft.minimap = v;
-        });
 
         // 「小地图」下面紧跟这一条：它只是上一条的补充。
         // 单独列出来是因为「节点少时自动隐藏」那条线用户看不见 ——
         // 开关开着却没有东西，只会被当成插件坏了。
         addToggle(
+            "canvas",
             this.t("set.minimapAlways", "小地图始终显示"),
             this.t("set.minimapAlwaysDesc", "打开后，节点较少时也显示缩略图。默认只在节点较多（30 个以上）时显示 —— 小图一眼能看完，缩略图是多余的。"),
             this.config.minimapAlways,
@@ -936,16 +1191,33 @@ export default class MindMapPlugin extends Plugin {
             },
         );
 
+        /* ════════════════════════════════════════════════ 交互
+         *
+         * 这一组回答「我怎么操作它」。鼠标在前、键盘在后 ——
+         * 新用户先摸到的是鼠标。 */
+
         addToggle(
-            this.t("set.viewPerDoc", "视图偏好跟文档走"),
-            this.t("set.viewPerDocDesc", "在这个列表里改过的布局 / 主题 / 连线会记进块属性（custom-mindmap-view），下次打开这个列表就恢复成你调好的样子；没改过的项继续跟随上面的全局默认。"),
-            this.config.viewPerDoc,
+            "interact",
+            this.t("set.dblclickEdit", "双击编辑节点"),
+            this.t("set.dblclickEditDesc", "双击节点直接改名，回车提交、Esc 取消，改动会写回思源"),
+            this.config.editable,
             (v) => {
-                draft.viewPerDoc = v;
+                draft.editable = v;
             },
         );
 
         addToggle(
+            "interact",
+            this.t("set.dragNode", "拖拽调整节点"),
+            this.t("set.dragNodeDesc", "按住节点拖动可调整顺序与层级：落在节点上下缘成为同级，落在中间成为子节点"),
+            this.config.draggable,
+            (v) => {
+                draft.draggable = v;
+            },
+        );
+
+        addToggle(
+            "interact",
             this.t("set.hoverPreview", "悬停预览折叠节点"),
             this.t("set.hoverPreviewDesc", "鼠标在折叠的节点上停一下，浮出一张卡片列出里面的前几个子节点。"),
             this.config.hoverPreview,
@@ -954,42 +1226,70 @@ export default class MindMapPlugin extends Plugin {
             },
         );
 
-        addText(
-            this.t("set.customColors", "自定义一级分支配色"),
-            this.t("set.customColorsDesc", "逗号分隔的十六进制颜色，按顺序分配给一级分支，超出部分循环取用。留空表示用主题自带色板。"),
-            this.config.customPalette,
+        addToggle(
+            "interact",
+            this.t("set.keyboard", "导图内快捷键"),
+            this.t("set.keyboardDesc", "导图获得焦点时接管键盘（方向键导航、Tab 加子节点、Enter 加同级、F2 改名等）。如果和思源的快捷键冲突，可以关掉它。"),
+            this.config.keyboard,
             (v) => {
-                draft.customPalette = v;
+                draft.keyboard = v;
             },
         );
 
-        setting.addItem({
-            title: this.t("set.shortcutBtn", "查看快捷键"),
-            description: this.t("set.shortcutHint", "在导图内单击任意节点即可用键盘操作"),
-            createActionElement: () => {
-                const btn = document.createElement("button");
-                btn.type = "button";
-                btn.className = "b3-button b3-button--outline fn__size200";
-                btn.textContent = this.t("ui.view", "查看");
-                btn.onclick = () => showMessage(this.shortcutHelp(), 12000);
-                return btn;
+        addToggle(
+            "interact",
+            this.t("set.ctrlWheel", "Ctrl + 滚轮缩放"),
+            this.t("set.ctrlWheelDesc", "按住 Ctrl（macOS 为 ⌘）滚动鼠标可缩放导图"),
+            this.config.ctrlWheelZoom,
+            (v) => {
+                draft.ctrlWheelZoom = v;
             },
-        });
+        );
 
-        setting.addItem({
-            title: this.t("copyDiagnostics", "复制诊断信息"),
-            description: this.t("set.diagDesc", "版本 / 配置 / 各视图状态 / 最近警告。只复制到剪贴板，不联网、不上报。"),
-            createActionElement: () => {
-                const btn = document.createElement("button");
-                btn.type = "button";
-                btn.className = "b3-button b3-button--outline fn__size200";
-                btn.textContent = this.t("ui.copy", "复制");
-                btn.onclick = () => void this.copyDiagnostics(btn);
-                return btn;
+        addToggle(
+            "interact",
+            this.t("set.wheelPan", "滚轮平移导图"),
+            this.t("set.wheelPanDesc", "开启后滚轮直接平移导图；关闭时滚轮用于滚动页面"),
+            this.config.wheelPan,
+            (v) => {
+                draft.wheelPan = v;
             },
-        });
+        );
+
+        addToggle(
+            "interact",
+            this.t("set.viewPerDoc", "视图偏好跟文档走"),
+            this.t("set.viewPerDocDesc", "在这个列表里改过的布局 / 主题 / 连线会记进块属性（custom-mindmap-view），下次打开这个列表就恢复成你调好的样子；没改过的项继续跟随上面的全局默认。"),
+            this.config.viewPerDoc,
+            (v) => {
+                draft.viewPerDoc = v;
+            },
+        );
+
+        // 这条是**说明**而不是开关：折叠状态本来就存在思源的列表结构里，
+        // 插件只是复用，没有任何可选的行为。
+        addHint(
+            "interact",
+            this.t("set.foldSync", "折叠状态与大纲同步"),
+            this.t("set.foldSyncDesc", "导图的折叠状态就是思源原生的列表折叠：在大纲里折一个节点，导图立刻跟着折；在导图上折一个节点，大纲也会跟着折。它随文档一起保存，所以离开时什么状态、下次进来就是什么状态。"),
+        );
+
+        /* ════════════════════════════════════════════════ 性能
+         *
+         * 这一组默认值都够用，只有「文档大到卡了」才需要进来调。 */
+
+        addToggle(
+            "perf",
+            this.t("set.lazyRender", "懒渲染"),
+            this.t("set.lazyRenderDesc", "列表块进入视口附近才渲染，长文档滚动更流畅"),
+            this.config.lazyRender,
+            (v) => {
+                draft.lazyRender = v;
+            },
+        );
 
         addNumber(
+            "perf",
             this.t("set.compactThreshold", "紧凑模式阈值"),
             this.t("set.compactThresholdDesc", "节点数超过该值时自动收紧节点间距"),
             this.config.compactThreshold,
@@ -1001,6 +1301,7 @@ export default class MindMapPlugin extends Plugin {
         );
 
         addNumber(
+            "perf",
             this.t("set.hardLimit", "渲染上限"),
             this.t("set.hardLimitDesc", "节点数超过该值时暂停渲染并给出提示，避免拖慢编辑器"),
             this.config.hardLimit,
@@ -1011,20 +1312,83 @@ export default class MindMapPlugin extends Plugin {
             },
         );
 
-        setting.addItem({
-            title: this.t("set.migrate", "迁移【自定义块样式】标记"),
-            description: this.t("set.migrateDesc", "把该插件标记的列表导图（custom-block-list-view = map）迁移为大纲导图"),
-            createActionElement: () => {
-                const btn = document.createElement("button");
-                btn.type = "button";
-                btn.className = "b3-button b3-button--outline fn__size200";
-                btn.textContent = this.t("set.migrateStart", "开始迁移");
-                btn.onclick = () => void this.runMigration();
-                return btn;
-            },
-        });
+        /* ════════════════════════════════════════════════ 帮助
+         *
+         * 三个入口都是「按钮」，都不是设置项 —— 点完就走，面板本身不用保存。 */
 
+        addButton(
+            "help",
+            this.t("set.shortcutBtn", "查看快捷键"),
+            this.t("set.shortcutHint", "在导图内单击任意节点即可用键盘操作"),
+            this.t("ui.view", "查看"),
+            () => this.openShortcutHelp(),
+        );
+
+        addButton(
+            "help",
+            this.t("copyDiagnostics", "复制诊断信息"),
+            this.t("set.diagDesc", "版本 / 配置 / 各视图状态 / 最近警告。只复制到剪贴板，不联网、不上报。"),
+            this.t("ui.copy", "复制"),
+            (btn) => void this.copyDiagnostics(btn),
+        );
+
+        addButton(
+            "help",
+            this.t("set.migrate", "迁移【自定义块样式】标记"),
+            this.t("set.migrateDesc", "把该插件标记的列表导图（custom-block-list-view = map）迁移为大纲导图"),
+            this.t("set.migrateStart", "开始迁移"),
+            () => void this.runMigration(),
+        );
+
+        /* ════════════════════════════════════════════════ 开面板 + 改造成选项卡 */
+
+        /**
+         * ⚠️ 快照必须在 `open()` **之前** 取：`open()` 是同步的，
+         * 返回时对话框已经在 DOM 里了，事后再取就分不出哪个是新的。
+         */
+        const before = new Set<Element>(Array.from(document.querySelectorAll(".b3-dialog--open")));
         setting.open(this.name);
+
+        /**
+         * 等思源把设置项渲染进 `.b3-dialog__content`，再把它改造成侧边选项卡。
+         *
+         * 为什么要**重试**而不是 `open()` 之后直接改：`open()` 目前是同步的
+         * （实测 3.8.5），但这是思源的内部实现、没有任何契约保证。写死「同步」
+         * 的话，哪天它改成异步渲染，插件会安静地退回扁平列表 —— 不崩、但功能
+         * 悄悄没了。重试的代价只有几十毫秒。
+         *
+         * 重试的判据是「行数正好等于我们 `addItem` 的次数」，所以也顺带把
+         * 「思源多渲染/少渲染了东西」这种情况挡在了 `layoutSettingTabs` 的
+         * 契约校验之外。
+         */
+        let tries = 0;
+        const attempt = () => {
+            tries++;
+            const dlg = Array.from(document.querySelectorAll(".b3-dialog--open")).find((d) => !before.has(d));
+            const content = dlg?.querySelector<HTMLElement>(".b3-dialog__content") ?? null;
+
+            if (content && content.children.length === groupOf.length) {
+                if (!layoutSettingTabs(content, groupOf, tabs)) {
+                    console.warn(
+                        `[mindmap] 设置面板：DOM 结构与预期不符（${groupOf.length} 条设置项已就位但类名/分组对不上），` +
+                            "已退回思源的扁平列表。功能不受影响，只是没有分组。",
+                    );
+                }
+                return;
+            }
+
+            if (tries < 40) {
+                nextFrame(attempt);
+                return;
+            }
+            // 40 帧（约 0.7 秒）还等不到：退回扁平列表，但**留一条警告** ——
+            // 这种失败是静默的，不写日志的话只能靠用户抱怨「设置面板怎么没分组」才发现。
+            console.warn(
+                `[mindmap] 设置面板：等待 ${groupOf.length} 条设置项超时` +
+                    `（对话框${dlg ? "已出现" : "未出现"}，实际 ${content ? content.children.length : "-"} 条），已退回扁平列表。`,
+            );
+        };
+        nextFrame(attempt);
     }
 
     private async saveConfig() {

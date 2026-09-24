@@ -456,10 +456,37 @@ try {
     await sleep(1800);
     const titles = await page.eval(`[...document.querySelectorAll('.b3-dialog--open .config-name')].map((e) => (e.textContent || '').trim())`);
     console.log(`  面板条目 ${titles.length} 项：${titles.join(" · ")}`);
+
+    /* 分区：面板已被插件重排成侧边选项卡，条目分散在 5 个 pane 里。
+       这里顺带 dump 一下，便于肉眼确认「搬运没丢东西」。 */
+    const layout = await page.eval(`(() => {
+        const d = document.querySelector('.b3-dialog--open');
+        if (!d) return { err: 'no-dialog' };
+        const content = d.querySelector('.b3-dialog__content');
+        return {
+            tabs: [...d.querySelectorAll('.mm-set__tab')].map((t) => (t.textContent || '').trim()),
+            panes: [...d.querySelectorAll('.mm-set__pane')].map((p) => ({
+                group: p.dataset.group,
+                rows: p.querySelectorAll(':scope > .config-item').length,
+            })),
+            orphan: content ? content.querySelectorAll(':scope > .config-item').length : -1,
+        };
+    })()`);
+    console.log("  分区：", JSON.stringify(layout));
+
+    /* 「查看快捷键」在「帮助」分区里 —— 它默认是 `display:none` 的。
+       程序化 `b.click()` 对隐藏元素照样生效，但为了让探针走的路径和真人一致
+       （也顺便验证切分区确实把控件放出来了），先点对应的 tab。 */
     const helpBtn = await page.eval(`(() => {
-        const row = [...document.querySelectorAll('.b3-dialog--open .config-name')].find((e) => (e.textContent || '').includes('查看快捷键'));
+        const d = document.querySelector('.b3-dialog--open');
+        const row = [...(d ? d.querySelectorAll('.config-name') : [])].find((e) => (e.textContent || '').includes('查看快捷键'));
         if (!row) return 'no-row';
-        const item = row.closest('.b3-label') || row.parentElement;
+        const item = row.closest('.config-item') || row.closest('.b3-label') || row.parentElement;
+        const pane = item && item.closest('.mm-set__pane');
+        if (pane && !pane.classList.contains('mm-set__pane--on')) {
+            const tab = d && d.querySelector('.mm-set__tab[data-group="' + pane.dataset.group + '"]');
+            if (tab && !tab.classList.contains('mm-set__tab--on')) tab.click();
+        }
         const b = item && item.querySelector('button');
         if (!b) return 'no-button';
         b.click();
@@ -467,7 +494,26 @@ try {
     })()`);
     console.log("  点「查看」：", helpBtn);
     await sleep(1100);
-    console.log("  提示：", JSON.stringify((await page.eval(`[...document.querySelectorAll('.b3-snackbar__content')].map((e) => (e.textContent || '').trim()).join(' ⏎ ')`)).slice(0, 260)));
+
+    /* 现在是**分组表格对话框**（`.mm-sc`），不再是 snackbar 通知。
+       形状：.mm-sc > .mm-sc__hint + .mm-sc__legend + N × .mm-sc__group
+             每个 group > .mm-sc__head + .mm-sc__rows > .mm-sc__row > (kbd.mm-sc__key + .mm-sc__what) */
+    const sc = await page.eval(`(() => {
+        const box = document.querySelector('.mm-sc');
+        if (!box) return { err: 'no-dialog' };
+        const rows = [...box.querySelectorAll('.mm-sc__row')].map((r) => ({
+            key: (r.querySelector('.mm-sc__key') || {}).textContent || '',
+            what: (r.querySelector('.mm-sc__what') || {}).textContent || '',
+        }));
+        return {
+            groups: [...box.querySelectorAll('.mm-sc__head')].map((h) => (h.textContent || '').trim()),
+            rows: rows.length,
+            noneRows: rows.filter((r) => (r.key || '').includes('菜单操作')).length,
+            head: rows.slice(0, 3).map((r) => r.key.trim() + ' → ' + r.what.trim()),
+            snackbars: document.querySelectorAll('.b3-snackbar__content').length,
+        };
+    })()`);
+    console.log("  快捷键对话框：", JSON.stringify(sc, null, 1).slice(0, 900));
 
     await page.screenshot(`${OUT}/probe-settings-effects.png`);
     console.log(`\n截图 ${OUT}/probe-settings-effects.png`);

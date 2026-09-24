@@ -588,6 +588,10 @@ try {
         return true;
     })()`);
     await sleep(1800);
+    // ⚠️ 面板现在是**侧边分区**的（5 个 tab，见 `core/settings-tabs.ts`）。
+    // 这里照旧用 `.config-name` 数条目：分区只是把行**搬**进不同的 pane，
+    // 非当前分区的行仍然在 DOM 里（只是 `display: none`），`textContent` 照样读得到。
+    // 「有没有被搬丢」是 `diag-settings-tabs.mjs` 的专项断言，不在这一支重复。
     const titles = await texts(".b3-dialog--open .config-name");
     const WANT = ["显示层级编号", "紧凑模式", "Ctrl + 滚轮缩放", "滚轮平移导图", "懒渲染", "布局动效", "视图偏好跟文档走", "悬停预览折叠节点", "渲染上限", "紧凑模式阈值", "画布高度"];
     const missing = WANT.filter((w) => !titles.some((t) => t.includes(w)));
@@ -597,40 +601,89 @@ try {
     // 上面那条用 `includes` 查，任何一行都能替另一行冒充。所以这两条按**精确相等**查。
     ok(titles.includes("画布高度"), "面板上有「画布高度」策略下拉（精确标题，不让数字框冒充）");
     ok(titles.includes("画布高度（px）"), "面板上有「画布高度（px）」数字框（精确标题）");
+    // 「查看快捷键」在 1.0.x 期间从**通知**改成了**分组表格对话框**（老实现是
+    // `showMessage` 弹一条 12 秒后自己消失的通知，四十多个键位挤在 12 条长句里）。
+    // 所以这里不再读 `.b3-snackbar__content`，而是读 `.mm-sc` 那个对话框。
+    // 面板现在有侧边分区，「查看快捷键」在「帮助」里 —— 先切过去（顺便走一遍真实路径）。
+    await page.eval(`(() => {
+        const t = [...document.querySelectorAll('.b3-dialog--open .mm-set__tab')].find((x) => (x.textContent || '').trim() === '帮助');
+        if (t) t.click();
+        return true;
+    })()`);
+    await sleep(300);
     const helpBtn = await page.eval(`(() => {
         const row = [...document.querySelectorAll('.b3-dialog--open .config-name')].find((e) => (e.textContent || '').includes('查看快捷键'));
         if (!row) return 'no-row';
-        const item = row.closest('.b3-label') || row.parentElement;
+        const item = row.closest('.config-item') || row.closest('.b3-label') || row.parentElement;
         const b = item && item.querySelector('button');
         if (!b) return 'no-button';
         b.click();
         return 'clicked';
     })()`);
     await sleep(1100);
-    const toast = (await texts(".b3-snackbar__content")).join(" ⏎ ");
-    ok(helpBtn === 'clicked' && /导航/.test(toast) && /编辑/.test(toast) && /剪贴/.test(toast), "「查看快捷键」弹出的清单覆盖 导航 / 编辑 / 剪贴 等分组", `${helpBtn}｜${toast.slice(0, 60)}…`);
-
-    // ★ 键位写法必须与**平台**一致。
-    // 思源的键位表示法是 macOS 字形（`⌥⌘D`），而且 `conf.json` 里存的也是它 ——
-    // 但思源自己的菜单在 Windows 上显示的是 `Ctrl+Alt+D`（实测：主菜单里
-    //「魔法排版」显示 `Ctrl+Alt+P`，其 keymap 存值正是 `⌥⌘P`）。
-    // 说明文字若写死 `⌥⌘`，Windows 用户看到的就是一套在自己「设置 → 快捷键」
-    // 里根本找不到的符号 —— 而这条**只有真机能验**（换算要读平台）。
-    //
-    // 断言范围要**收窄到全局那一行**：第一版写成对整段弹层扫 `/[⌥⌘]/`，
-    // 结果被「聚焦：Ctrl/⌘ + 双击节点」这行判红 —— 那是**故意的跨平台写法**
-    //（两种都给出），本身没问题。所以只对全局行断言，且只禁 `⌥`：
-    // `⌘` 在「Ctrl/⌘」这类跨平台写法里是合法的，`⌥` 则没有任何合法用途。
-    const isMac = await page.eval(`!!(window.siyuan && window.siyuan.config && window.siyuan.config.system && window.siyuan.config.system.os === 'darwin')`);
-    const globalLine = toast.split(/\n|\s*⏎\s*/).find((s) => s.includes("把光标所在的列表切换为导图")) || "";
-    const lineHasGlyph = /[⌥⌘]/.test(globalLine);
-    const lineHasReadable = /Ctrl\+Alt\+D/.test(globalLine) && /Ctrl\+Alt\+V/.test(globalLine);
-    const optionGlyphAnywhere = toast.includes("⌥");
+    const scGroups = (await texts(".b3-dialog--open .mm-sc__head")).join(" / ");
+    const scRows = await texts(".b3-dialog--open .mm-sc__row");
+    const scSnackbars = await page.eval(`document.querySelectorAll('.b3-snackbar').length`);
+    ok(helpBtn === 'clicked', "「查看快捷键」的按钮点得动", helpBtn);
     ok(
-        isMac ? lineHasGlyph : lineHasReadable && !lineHasGlyph && !optionGlyphAnywhere,
-        "★ 全局键位的写法与平台一致（Windows 上必须是 Ctrl+Alt+D / Ctrl+Alt+V，整段不出现 ⌥）",
-        `os=${isMac ? "darwin" : "win/linux"}｜全局行含 ⌥⌘: ${lineHasGlyph}｜含 Ctrl+Alt: ${lineHasReadable}｜整段含 ⌥: ${optionGlyphAnywhere}｜「${globalLine.slice(0, 52)}」`,
+        scRows.length > 0 && /导航/.test(scGroups) && /编辑/.test(scGroups) && /剪贴/.test(scGroups),
+        "「查看快捷键」弹出**分组表格**，覆盖 导航 / 编辑 / 剪贴 等分组",
+        `${scRows.length} 行｜${scGroups.slice(0, 40)}…`,
     );
+    ok(scSnackbars === 0, "★ 不再是会自己消失的通知（老实现是 showMessage + 12 秒）", `snackbar ${scSnackbars} 个`);
+
+    // ★ 键位写法必须与**平台**一致，且空格必须**看得见**。
+    //
+    // 两件事叠在这里，都是只有真机能验的：
+    //  ① 思源的键位表示法是 macOS 字形（`⌘ ` / `⌥ `），而思源自己的菜单在 Windows 上
+    //     显示的是 `Ctrl+...`（实测：主菜单里「魔法排版」显示 `Ctrl+Alt+P`，
+    //     其 keymap 存值正是 `⌥⌘P`）。说明文字若写死 `⌘`/`⌥`，Windows 用户看到的就是
+    //     一套在自己「设置 → 快捷键」里根本找不到的符号。
+    //  ② 空格在思源的键位串里是**一个字面空格**（`KEYCODELIST[32] = " "`，
+    //     即 `Ctrl+空格` 的键位串是 `"⌘ "`）。不换算就渲染成看不见的 `Ctrl+ `，
+    //     用户完全读不出该按什么。
+    //
+    // 断言范围要**收窄到全局那两行**：第一版写成对整段弹层扫 `/[⌥⌘]/`，
+    // 结果被「聚焦：Ctrl / ⌘ + 双击节点」这行判红 —— 那是**故意的跨平台写法**
+    // （两种都给出），本身没问题。所以只对全局行断言，且只禁 `⌥`：
+    // `⌘` 在「Ctrl / ⌘」这类跨平台写法里是合法的，`⌥` 则没有任何合法用途。
+    const isMac = await page.eval(`!!(window.siyuan && window.siyuan.config && window.siyuan.config.system && window.siyuan.config.system.os === 'darwin')`);
+    const scPairs = await page.eval(`[...document.querySelectorAll('.b3-dialog--open .mm-sc__row')].map((r) => ({
+        k: ((r.querySelector('.mm-sc__key') || {}).textContent || '').trim(),
+        d: ((r.querySelector('.mm-sc__what') || {}).textContent || '').trim(),
+    }))`);
+    const toggleRow = scPairs.find((r) => /把光标所在的列表切换为导图/.test(r.d)) || { k: "", d: "" };
+    const sideRow = scPairs.find((r) => /并排面板打开导图/.test(r.d)) || { k: "", d: "" };
+    ok(
+        /空格/.test(toggleRow.k) && !/\s$/.test(toggleRow.k),
+        "★ 键位里的空格渲染成了**可见**的「空格」，没有尾随空白（否则用户看到的是 `Ctrl+ `）",
+        JSON.stringify(toggleRow.k),
+    );
+    ok(
+        isMac ? /^⌘空格$/.test(toggleRow.k) && /^⌥空格$/.test(sideRow.k) : toggleRow.k === "Ctrl+空格" && sideRow.k === "Alt+空格",
+        "★ 全局键位按平台换算（Windows：Ctrl+空格 / Alt+空格；macOS：⌘空格 / ⌥空格）",
+        `os=${isMac ? "darwin" : "win/linux"}｜${JSON.stringify(toggleRow.k)} / ${JSON.stringify(sideRow.k)}`,
+    );
+    const optionGlyphAnywhere = scPairs.some((r) => r.k.includes("⌥"));
+    ok(isMac || !optionGlyphAnywhere, "★ Windows 上整份速查不出现 ⌥（那是 macOS 字形）", `含 ⌥ 的行 ${scPairs.filter((r) => r.k.includes("⌥")).length} 条`);
+
+    // 关掉速查对话框，好让下面的「迁移」按钮露出来（它也在「帮助」分区里）
+    const closedSc = await page.eval(`(() => {
+        const dlg = [...document.querySelectorAll('.b3-dialog--open')].find((d) => d.querySelector('.mm-sc'));
+        if (!dlg) return 'gone';
+        // 首选走思源自己的 Dialog 实例：destroy() 关掉的不只是 DOM，还有实例里登记的监听
+        const inst = (window.siyuan.dialogs || []).find((x) => x.element && x.element.querySelector('.mm-sc'));
+        if (inst && typeof inst.destroy === 'function') { inst.destroy(); return 'destroyed'; }
+        // ⚠️ 兜底点关闭按钮时**不能**调 .click()：那个按钮是 <svg>，而
+        // Element.prototype.click 只长在 HTMLElement 上，SVGElement 上没有 ——
+        // 直接调会抛 "close.click is not a function"（第一版就是这么翻的车）。
+        const close = dlg.querySelector('.b3-dialog__close') || dlg.querySelector('[class*="__close"]');
+        if (close) { close.dispatchEvent(new MouseEvent('click', { bubbles: true })); return 'clicked-close'; }
+        dlg.remove();
+        return 'removed';
+    })()`);
+    ok(closedSc !== "gone", "速查对话框关得掉", closedSc);
+    await sleep(500);
 
     // 面板里的「迁移【自定义块样式】标记」按钮 —— 它的**文案**在 tests/ 里零命中。
     // 命令本身由 `diag-commands.mjs` 的 F 段验过，但「面板上这个按钮有没有接上线」
@@ -640,7 +693,7 @@ try {
     const migBtn = await page.eval(`(() => {
         const row = [...document.querySelectorAll('.b3-dialog--open .config-name')].find((e) => (e.textContent || '').includes('迁移'));
         if (!row) return 'no-row';
-        const item = row.closest('.b3-label') || row.parentElement;
+        const item = row.closest('.config-item') || row.closest('.b3-label') || row.parentElement;
         const b = item && item.querySelector('button');
         if (!b) return 'no-button';
         b.click();

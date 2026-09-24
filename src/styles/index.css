@@ -5,6 +5,11 @@
    颜色只通过 --mm-* 与 --c-* 自定义属性注入，不直接引用思源的 --b3-* 变量，
    这样导出 SVG 时把变量解析成具体值即可完整还原外观。
 
+   ⚠️ 例外：**浮动 UI 与对话框**不在 .mm-root 里，也不进 SVG 导出 ——
+   它们反而应当跟着宿主主题走，所以用 --b3-* 变量 + 兜底值。目前有三处：
+   .mm-preview（悬停预览）、.mm-set（设置面板）、.mm-sc（快捷键速查）。
+   各自的小节里都写了理由。
+
    注意：.mm-node 必须用 width: max-content。
    它和 .mm-world / .mm-nodes 都是绝对定位，若用 width: auto 会退化成
    shrink-to-fit，而 .mm-nodes 没有在流子元素 → 可用宽度 0 → 节点宽度坍缩成
@@ -2035,5 +2040,217 @@
         min-width: 32px;
         height: 28px;
     }
+}
+
+/* ================================================================ 设置面板（侧边选项卡）
+
+   思源的 `Setting` 只渲染一个**扁平列表**（一行一个设置项），选项卡是插件
+   自己在 `open()` 之后把 `.b3-dialog__content` 的子元素重排出来的 ——
+   为什么必须这么绕、以及为什么失败时要原样退回，见 `core/settings-tabs.ts`。
+
+   颜色用宿主变量 `--b3-*` 而不是 `--mm-*`：这一块**永远不进 SVG 导出**，
+   跟着用户当前主题走才是对的（同 `.mm-preview`）。 */
+
+/* 挂到思源那个 `.b3-dialog__content` 上。
+   ⚠️ 两条 `!important` 是必要的：思源给它自带 `padding` 与 `overflow: auto`，
+   而 `.mm-set-host` 与 `.b3-dialog__content` 特异性相同，谁生效取决于样式表
+   的先后顺序 —— 插件样式被注入的时机不由我们决定。 */
+.mm-set-host {
+    display: flex;
+    padding: 0 !important;
+    overflow: hidden !important;
+}
+
+.mm-set {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    font-size: 13px;
+    color: var(--b3-theme-on-background, #202124);
+}
+
+/* ---------------------------------------------------------------- 左侧导航 */
+
+.mm-set__nav {
+    flex: 0 0 136px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    box-sizing: border-box;
+    padding: 8px 6px;
+    overflow-y: auto;
+    border-right: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.24));
+    background: var(--b3-theme-surface, #ffffff);
+}
+
+.mm-set__tab {
+    display: block;
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--b3-theme-on-surface, #202124);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.mm-set__tab:hover {
+    background: var(--b3-list-hover, rgba(128, 128, 128, 0.12));
+}
+
+.mm-set__tab--on,
+.mm-set__tab--on:hover {
+    background: var(--b3-theme-primary-lightest, rgba(53, 120, 255, 0.12));
+    color: var(--b3-theme-primary, #3578ff);
+    font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- 右侧内容区 */
+
+/* ⚠️ `min-height: 0` 不能省：弹性子项的默认值是 `min-height: auto`，
+   会被内容撑开 —— 那样滚动条就跑到整个对话框上去了，分组标题也不再吸顶。 */
+.mm-set__panes {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    box-sizing: border-box;
+    padding: 0 14px 14px;
+    overflow-y: auto;
+}
+
+.mm-set__pane {
+    display: none;
+}
+
+.mm-set__pane--on {
+    display: block;
+}
+
+/* 分组标题吸顶：一屏放不下时滚动，用户仍然知道自己在哪一组 */
+.mm-set__head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 12px 0 8px;
+    border-bottom: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.24));
+    background: var(--b3-theme-background, #ffffff);
+}
+
+.mm-set__title {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.mm-set__desc {
+    margin-top: 2px;
+    font-size: 12px;
+    color: var(--b3-theme-on-surface-light, rgba(128, 128, 128, 1));
+}
+
+.mm-set__pane > .config-item:last-child {
+    margin-bottom: 0;
+}
+
+/* ================================================================ 快捷键速查对话框
+
+   老实现是一条 12 秒后自己消失的通知，四十多个键位挤在 12 条长句里。
+   现在渲染成「分组标题 + 每行『键位 | 作用』两列」。
+
+   ⚠️ 键位列用**固定宽度**而不是 `max-content`：每个分组各自是一个 grid，
+   用 max-content 的话每组的列宽互不相干，纵向就对不齐了 —— 40 行表格
+   对不齐比不对齐的 5 行更刺眼。 */
+
+.mm-sc {
+    font-size: 13px;
+    color: var(--b3-theme-on-background, #202124);
+}
+
+.mm-sc__hint {
+    padding: 8px 10px;
+    margin-bottom: 10px;
+    border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.24));
+    border-radius: 6px;
+    background: var(--b3-theme-surface, #ffffff);
+    color: var(--b3-theme-on-surface-light, rgba(128, 128, 128, 1));
+    font-size: 12px;
+}
+
+/* 表头。列宽与 `.mm-sc__row` 必须一致，否则「键位 / 作用」对不上下面的列 */
+.mm-sc__legend,
+.mm-sc__row {
+    display: grid;
+    grid-template-columns: 168px minmax(0, 1fr);
+    gap: 10px;
+    align-items: baseline;
+}
+
+.mm-sc__legend {
+    padding: 0 4px 5px;
+    color: var(--b3-theme-on-surface-light, rgba(128, 128, 128, 1));
+    font-size: 11px;
+}
+
+.mm-sc__group + .mm-sc__group {
+    margin-top: 14px;
+}
+
+.mm-sc__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    padding-bottom: 5px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.24));
+    font-weight: 600;
+}
+
+.mm-sc__note {
+    font-weight: 400;
+    font-size: 12px;
+    color: var(--b3-theme-on-surface-light, rgba(128, 128, 128, 1));
+}
+
+.mm-sc__rows {
+    display: grid;
+    gap: 3px;
+}
+
+.mm-sc__row {
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+
+.mm-sc__row:hover {
+    background: var(--b3-list-hover, rgba(128, 128, 128, 0.1));
+}
+
+/* 键位。`word-break: keep-all` + `white-space: normal` 是为了让长键位
+   （如 `→ / {space} / PageDown`）只在**分隔符的空格**处折行，而不是把
+   某个单词从中间劈开 —— 键位读错一个字符就按不出来了。 */
+.mm-sc__key {
+    justify-self: start;
+    padding: 1px 7px 2px;
+    border: 1px solid var(--b3-border-color, rgba(128, 128, 128, 0.32));
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    background: var(--b3-theme-surface, #ffffff);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: normal;
+    word-break: keep-all;
+}
+
+/* 「这一行没有键位，是菜单 / 按钮操作」。做成虚线框而不是留空 ——
+   留空会让人以为这里漏了内容。 */
+.mm-sc__key--none {
+    border-style: dashed;
+    border-bottom-width: 1px;
+    color: var(--b3-theme-on-surface-light, rgba(128, 128, 128, 1));
+    font-family: inherit;
 }
 

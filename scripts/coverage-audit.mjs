@@ -17,9 +17,11 @@
  *  · 宿主菜单 —— `index.ts` 里 `IMenu[]` 的 `label:`
  *  · **自绘 UI** —— `renderer.ts` 里的 tooltip（`dataset.mmTip`）、
  *    菜单项（`item("…", …)` / `label: "…"`）、按钮（`mk("…")` / `btn("…")` / `row("…")`）
- *  · 设置面板 —— `addToggle / addSelect / addNumber / addText / addItem({ title })`
- *  · 导图内快捷键 —— `SHORTCUT_HELP`（这是插件**对用户公开承诺**的清单，
- *    比从 `onKeyDown` 里正则抠键名可靠得多，而且「承诺了却没实现」本身就是缺陷）
+ *  · 设置面板 —— `addToggle / addSelect / addNumber / addText / addHint / addButton`
+ *    （都在 `index.ts` 的 `openSetting()` 里，第一个参数是分组名）
+ *  · 导图内快捷键 —— `core/shortcuts.ts` 的 `SHORTCUT_GROUPS`（这是插件
+ *    **对用户公开承诺**的清单，比从 `onKeyDown` 里正则抠键名可靠得多，
+ *    而且「承诺了却没实现」本身就是缺陷）
  *
  * ## 判据是「命中」不是「覆盖」
  *
@@ -49,10 +51,17 @@
  *
  * ## 附加：承诺 × 实现 对账
  *
- * 最后一节把 `SHORTCUT_HELP` 抠出来的键名，逐条映射到 `onKeyDown` 里的处理判据，
+ * 最后一节把 `SHORTCUT_GROUPS` 里的键位，逐条映射到 `onKeyDown` 里的处理判据，
  * 双向报缺口：
  *   · **承诺了没实现** —— 用户在速查里看到、按下去没反应（比没文档更糟）
  *   · **实现了没承诺** —— 功能在、但没人能发现
+ *
+ * ## ⚠️ 行尾陷阱（曾经让整节结论失效）
+ *
+ * 本仓库 `core.autocrlf=true`，工作区文件是 **CRLF**。任何以 `\n` 收尾的正则
+ * （`/\n    \}\n/` 这种）在 CRLF 上永远匹配不上，而失配的表现是**静默返回空**：
+ * `handledKeys()` 因此长期解析出 0 个键，整节「承诺 × 实现」全是噪音。
+ * 现在归一化放在 `read()` 里，新加的正则自动受益。
  *
  * 用法：node scripts/coverage-audit.mjs [--json]
  */
@@ -63,12 +72,32 @@ const ROOT = process.cwd();
 const SRC = path.join(ROOT, "src");
 const TESTS = path.join(ROOT, "tests");
 
-const read = (p) => fs.readFileSync(p, "utf8");
+/**
+ * 读源文件，并把 CRLF 归一成 LF。
+ *
+ * ⚠️ 不归一的话，所有**以 `\n` 收尾的正则都会静默失配**：本仓库
+ * `core.autocrlf=true`，工作区是 CRLF，于是 `/\n    \}\n/` 这种模式永远匹配不上
+ * （真实字节是 `\r\n    }\r\n`）。
+ *
+ * `handledKeys()` 就这么静默失效了很久 —— 它的失败形态是「onKeyDown 一个 key
+ * 判据都没解析出来」，而「承诺 × 实现」那一整节因此全是噪音。归一放在**读取
+ * 入口**这一处，比在每个正则里补 `\r?` 可靠得多：以后新加的正则自动受益。
+ */
+const read = (p) => fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 
 /* ---------------------------------------------------------------- 读源码 */
 
 const indexSrc = read(path.join(SRC, "index.ts"));
 const rendererSrc = read(path.join(SRC, "core", "renderer.ts"));
+/**
+ * 快捷键速查的**数据**源。
+ *
+ * ⚠️ 它原本住在 `index.ts` 的 `SHORTCUT_HELP`（12 条长句）。搬走之后这个脚本
+ * 一度仍在 `indexSrc` 里找 `const SHORTCUT_HELP` —— 找不到就返回空串，
+ * 于是「快捷键承诺 0 条」外加 4 条反向缺口全部误报，而脚本**照常打印报告**。
+ * 好在 `SELF_CHECK` 里有「取不到源码块」这一条，才让它表现为失败而不是幻觉。
+ */
+const shortcutsSrc = read(path.join(SRC, "core", "shortcuts.ts"));
 
 /* ---------------------------------------------------------------- 读测试 */
 
@@ -247,34 +276,52 @@ function uiEntries() {
     });
 }
 
-/** 设置面板项 —— 跑在折叠后的源码上（`addToggle(this.t("键","标题"), …)` → `addToggle("标题", …)`） */
+/**
+ * 设置面板项 —— 跑在折叠后的源码上（`addToggle(this.t("键","标题"), …)` → `addToggle("标题", …)`）。
+ *
+ * ⚠️ 每个 `add*` 的**第一个参数是分组名**（`"appearance"` 之类，见
+ * `core/settings-tabs.ts`）。所以下面每条正则前面都挂一个可选的 `OPT_GROUP`，
+ * 先吃掉那个字面量再抓标题。分组名是插件内部标识、不是用户可见文案，不进报告。
+ *
+ * 写成**可选**而不是必填：`add*` 的定义处也在这个文件里被扫到过，
+ * 万一以后有人加一个不带分组的辅助函数，不至于整条被静默跳过 ——
+ * 「静默跳过」正是这个函数历史上出过两次事故的形态（见下面两条注释）。
+ */
+const OPT_GROUP = String.raw`\s*(?:"(?:[^"\\]|\\.)*"\s*,\s*)?`;
+const STR = String.raw`"(?:[^"\\]|\\.)*"`;
+
 function settingItems() {
     const out = [];
     const push = (kind, title, configKey) => out.push({ kind, title, configKey: configKey ?? "" });
+    const re = (body) => new RegExp(body, "g");
 
-    for (const m of indexFold.matchAll(/addToggle\(\s*("(?:[^"\\]|\\.)*")\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(this\.config\.\w+)/g)) {
+    // toggle：`addToggle([分组,] "标题", "描述", this.config.x, …)`
+    // `\s*` 本身就能跨行，所以单行 / 跨行两种写法用一条正则即可
+    for (const m of indexFold.matchAll(re(String.raw`addToggle\(${OPT_GROUP}(${STR})\s*,\s*${STR}\s*,\s*(this\.config\.\w+)`))) {
         push("toggle", m[1].slice(1, -1), m[2].replace("this.config.", ""));
     }
-    // 跨行的 addToggle("标题",\n "描述",\n this.config.x, ...)
-    for (const m of indexFold.matchAll(/addToggle\(\s*("(?:[^"\\]|\\.)*")\s*,\s*\n?\s*"(?:[^"\\]|\\.)*"\s*,\s*\n?\s*(this\.config\.\w+)/g)) {
-        push("toggle", m[1].slice(1, -1), m[2].replace("this.config.", ""));
-    }
+    // select：`addSelect([分组,] "标题", "描述", <选项>, …)`
     // 第三个参数有两种写法：
-    //   · `this.localize(EDGE_OPTIONS, "edge")` / `Object.fromEntries(...)` —— 抓首词当配置键线索
+    //   · `this.localize(EDGE_OPTIONS, "edge")` / `Object.fromEntries(...)`
     //   · **内联对象字面量** `{ auto: …, fixed: …, fill: … }` —— 抓不到键，留空
     // ⚠️ 原来只认 `(\w+)`，于是以 `{` 开头的内联对象**整条被静默跳过**：
     //    表现是「设置项 N」比面板实测少 1，不报错、不红，只是少了一行。
     //    这正是「探针不会红，只会给出过时结论」的又一例 —— 靠下面那条
     //    「两个数字必须相等」的自检才逼出来的。
-    for (const m of indexFold.matchAll(/addSelect\(\s*("(?:[^"\\]|\\.)*")\s*,\s*\n?\s*"(?:[^"\\]|\\.)*"\s*,\s*\n?\s*([\w{])/g)) {
+    for (const m of indexFold.matchAll(re(String.raw`addSelect\(${OPT_GROUP}(${STR})\s*,\s*${STR}\s*,\s*([\w{])`))) {
         push("select", m[1].slice(1, -1), m[2] === "{" ? "" : m[2]);
     }
-    for (const m of indexFold.matchAll(/addNumber\(\s*("(?:[^"\\]|\\.)*")/g)) push("number", m[1].slice(1, -1));
-    for (const m of indexFold.matchAll(/addText\(\s*("(?:[^"\\]|\\.)*")/g)) push("text", m[1].slice(1, -1));
+    for (const m of indexFold.matchAll(re(String.raw`addNumber\(${OPT_GROUP}(${STR})`))) push("number", m[1].slice(1, -1));
+    for (const m of indexFold.matchAll(re(String.raw`addText\(${OPT_GROUP}(${STR})`))) push("text", m[1].slice(1, -1));
     // `addHint` 是「纯说明条目」（没有可操作控件），也是 setting.addItem 的一层包装。
     // 漏了它会让「设置项 N」与面板实测的 `.config-name` 数差 1 ——
     // 而报告里那行「设置项 24（面板实测 25）」的括号对比，正是当初发现这个漏项的线索。
-    for (const m of indexFold.matchAll(/addHint\(\s*("(?:[^"\\]|\\.)*")/g)) push("hint", m[1].slice(1, -1));
+    for (const m of indexFold.matchAll(re(String.raw`addHint\(${OPT_GROUP}(${STR})`))) push("hint", m[1].slice(1, -1));
+    // `addButton` —— 右侧是按钮的设置项。原先这三处是裸的 `setting.addItem({…})`，
+    // 后来收成了 helper（顺带把分组参数统一到一处），所以判据跟着换。
+    for (const m of indexFold.matchAll(re(String.raw`addButton\(${OPT_GROUP}(${STR})`))) push("action", m[1].slice(1, -1));
+    // 兜底：万一以后有人又直接写 `setting.addItem({ title: … })`，这条能接住，
+    // 不会变成「面板多了一项而报告不知道」。
     for (const m of indexFold.matchAll(/setting\.addItem\(\{\s*\n?\s*title:\s*("(?:[^"\\]|\\.)*")/g)) {
         push("action", m[1].slice(1, -1));
     }
@@ -289,36 +336,75 @@ function settingItems() {
 }
 
 /**
- * `SHORTCUT_HELP` 数组的源码片段。
+ * `SHORTCUT_GROUPS` 数组的源码片段。
  *
- * ⚠️ 原来这里是 `/const SHORTCUT_HELP = \[([\s\S]*?)\]\.join/` —— 它依赖
- * 「数组直接 `.join(...)`」这个**早已不存在**的写法（现在数组末尾是 `];`，
- * 拼接挪进了 `shortcutHelp()`）。正则失配后不报错，只是静默返回空串，
- * 于是报告里出现「快捷键承诺 0 条」，外加 4 条反向缺口全部误报。
- * 改成「从 `const SHORTCUT_HELP` 找到下一行 `];`」，与拼接口径解耦。
+ * ⚠️ 这个函数已经换过一次判据，两次都是「正则失配后静默返回空串」：
+ *
+ *  1. 最初是 `/const SHORTCUT_HELP = \[([\s\S]*?)\]\.join/` —— 依赖「数组直接
+ *     `.join(...)`」这个早已不存在的写法；
+ *  2. 改成「从 `const SHORTCUT_HELP` 找到下一行 `];`」之后稳定了一阵，
+ *     但数据又搬去了 `core/shortcuts.ts` 的 `SHORTCUT_GROUPS`。
+ *
+ * 两次的失败形态一模一样：报告里出现「快捷键承诺 0 条」+ 4 条反向缺口误报，
+ * 而脚本照常退出 0。所以 `SELF_CHECK` 里那条「取不到源码块」的断言是必需的 ——
+ * 它把「解析器脱节」变成一次失败，而不是一份自信的过时报告。
  */
 function shortcutBlock() {
-    const start = indexSrc.indexOf("const SHORTCUT_HELP");
+    const start = shortcutsSrc.indexOf("export const SHORTCUT_GROUPS");
     if (start < 0) return "";
-    const end = indexSrc.indexOf("\n];", start);
-    return end < 0 ? "" : indexSrc.slice(start, end);
+    // 分组是对象数组，`];` 收尾
+    const end = shortcutsSrc.indexOf("\n];", start);
+    return end < 0 ? "" : shortcutsSrc.slice(start, end);
 }
 
 /**
- * SHORTCUT_HELP 里对用户承诺的快捷键。
+ * `SHORTCUT_KEYS` 的「键名 → 中文兜底」。
  *
- * 每行是 `[语义键, 文案]` **一对**，所以取每对的第二个字符串 ——
- * 第一个是 `shortcut.nav` 这类词表键，不是文案。
+ * 只用来把报告里的**分组名**还原成人看得懂的中文：`SHORTCUT_GROUPS` 里的
+ * `t:` 是 i18n 键名（`sc.nav`），直接打进报告就成了一串内部标识。
+ */
+function shortcutLabels() {
+    const out = {};
+    const start = shortcutsSrc.indexOf("export const SHORTCUT_KEYS");
+    if (start < 0) return out;
+    const end = shortcutsSrc.indexOf("\n];", start);
+    if (end < 0) return out;
+    for (const m of shortcutsSrc.slice(start, end).matchAll(/\[\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*\]/g)) {
+        out[m[1]] = m[2];
+    }
+    return out;
+}
+
+/**
+ * 速查清单里对用户承诺的快捷键。
+ *
+ * ## 形状变过，语义没变
+ *
+ * 老数据是 `[语义键, "导航：↑↓ 同级 · ← 父节点 · …"]` —— 一组键位串成**一句话**。
+ * 新数据是 `{ t: "sc.nav", rows: [{ k: "↑ / ↓", d: "sc.nav.ud" }, …] }` ——
+ * 键位成了独立字段、作用另有词表键。
+ *
+ * 这里把键位**重新拼回一句 ` · ` 连接的话**，让下游 `auditClaim()` 抠键名的
+ * 正则原样能用。同时做两处归一，都是为了保住判据的稳定性：
+ *
+ *  · `" + "` → `"+"`、`" / "` → `"/"` —— 新数据写得松（`Ctrl + = / -`），
+ *    老数据写得紧（`Ctrl+=/-`），而 `CLAIM_RULES` 里的 `tok` 是按紧的那套写的；
+ *  · `{space}` → `空格` —— 占位符是**渲染层**的写法，对账要的是**用户看到的
+ *    那个键**。不换的话「空格 折叠」这条承诺会凭空消失。
  */
 function shortcutClaims() {
     const block = shortcutBlock();
     if (!block) return [];
+    const labels = shortcutLabels();
     const out = [];
-    for (const m of block.matchAll(/\[\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*\]/g)) {
-        const text = m[2];
-        if (!text.trim()) continue; // 空行占位 `["", ""]`
-        const [head, ...rest] = text.split("：");
-        out.push({ group: head, detail: rest.join("：") });
+    // `t: "sc.xxx",` 起头，随后第一个 `rows: [ … ]` 是这一组的行
+    for (const g of block.matchAll(/t:\s*"((?:[^"\\]|\\.)*)"\s*,[\s\S]*?rows:\s*\[([\s\S]*?)\]/g)) {
+        const keys = [...g[2].matchAll(/k:\s*"((?:[^"\\]|\\.)*)"/g)]
+            .map((m) => m[1])
+            .filter((s) => s.trim())
+            .map((s) => s.split(" + ").join("+").split(" / ").join("/").split("{space}").join("空格"));
+        if (!keys.length) continue; // 整组都是「没有键位」的菜单操作行
+        out.push({ group: labels[g[1]] ?? g[1], detail: keys.join(" · ") });
     }
     return out;
 }
@@ -630,9 +716,9 @@ const measuredSettings = (() => {
  * 让「解析器脱节」表现为一次失败，而不是一份自信的报告。
  */
 const SELF_CHECK = [];
-if (!shortcutBlock()) SELF_CHECK.push("取不到 SHORTCUT_HELP 源码块 —— 解析已与源码脱节");
+if (!shortcutBlock()) SELF_CHECK.push("取不到 SHORTCUT_GROUPS 源码块 —— 解析已与源码脱节（数据在 core/shortcuts.ts）");
 if (!HELP_TEXT) SELF_CHECK.push("速查清单原文为空 —— 反向缺口判定会全部误报");
-if (CLAIMS.length === 0) SELF_CHECK.push("SHORTCUT_HELP 一条承诺都没解析出来 —— 正则脱节，或清单被清空");
+if (CLAIMS.length === 0) SELF_CHECK.push("SHORTCUT_GROUPS 一条承诺都没解析出来 —— 正则脱节，或清单被清空");
 if (KEYS.keys.length === 0) SELF_CHECK.push("onKeyDown 一个 key 判据都没解析出来 —— 正则脱节");
 if (COMMANDS.length === 0) SELF_CHECK.push("一个 addCommand 都没解析出来 —— 正则脱节");
 if (MENUS.length === 0) SELF_CHECK.push("一条宿主菜单文案都没解析出来 —— 正则脱节");
@@ -713,7 +799,7 @@ for (const r of rows) {
 
 /* ---- 承诺 × 实现 ---- */
 console.log("\n" + "=".repeat(104));
-console.log("对账：SHORTCUT_HELP 承诺 × onKeyDown / addCommand 实际实现");
+console.log("对账：SHORTCUT_GROUPS 承诺 × onKeyDown / addCommand 实际实现");
 console.log("=".repeat(104));
 console.log(`onKeyDown 里出现的 key 字面量（${KEYS.keys.length} 个）：${KEYS.keys.join(" ")}`);
 console.log(`onKeyDown 里出现的修饰键判据：${KEYS.modifiers.join(" ") || "(无)"}\n`);

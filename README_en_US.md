@@ -29,24 +29,50 @@ An outline is already a tree — it just doesn't look like one once it gets deep
 ## Usage
 
 1. Open the block menu on any list block
-2. Choose **Plugin → Outline Mind Map → Logic chart** (or Mind map / Tree chart)
-3. The list turns into a mind map; pick **Outline view** to switch back at any time
+2. Choose **Plugin → Outline Mind Map**, then pick one of three modes:
+
+   | Mode | What it does |
+   | --- | --- |
+   | **Outline mode** (map off) | The list stays exactly as it is |
+   | **Map mode** | The list becomes a mind map; defaults to the **logic chart** |
+   | **Side-by-side mode** (outline + map) | The outline stays on the left, a linked map opens on the right — editing either side updates the other |
+
+3. To switch structure (logic chart / mind map / tree chart), use **the map's own toolbar** rather than
+   the block menu — that's where "what the map looks like" belongs, and you see the result immediately.
+
+> The menu only answers "do I want a map, and do I want it side by side". **Layouts are not in the menu.**
+> The old menu flattened five items ("Outline view / Logic chart / Mind map / Tree chart / Side by side"),
+> mixing two different levels of decision.
+>
+> One related gotcha: **picking "Map mode" while already in map mode does not reset the layout** —
+> otherwise your manual switch to "Tree chart" would be silently undone by a single menu click.
 
 You can also run **Toggle the list at the cursor between mind map and outline** from the command palette (`Ctrl + P`),
 or **Open the current list's mind map in the side panel** to view the map next to the outline.
 
-Three entry points are available:
+Four entry points are available:
 
 | Entry | Where | What it does |
 | --- | --- | --- |
 | Block menu | list block icon → Plugin → Outline Mind Map | Converts that one list |
 | Top bar icon | the tree icon on the right of the top toolbar | Convert the current list, open side-by-side, convert every list in the document, open settings |
 | Command panel | `Alt + Shift + P`, then search "mind map" | Both commands live here, with proper labels |
-| Shortcuts | `Alt + Cmd + D` toggles map / outline, `Alt + Cmd + V` opens the side panel | Rebindable in SiYuan's shortcut settings |
+| Shortcuts | `Ctrl + Space` toggles map / outline, `Alt + Space` opens the side panel | Rebindable in SiYuan's shortcut settings |
+
+> On macOS these read `⌘ + Space` and `⌥ + Space`.
+> ⚠️ SiYuan stores "space" as a **literal space character** in its key strings (not the word `Space`),
+> so the binding is literally `⌘ ` — a `⌘` followed by a space.
+> That's why the in-app shortcut reference renders it as the visible word "Space": pasting it raw
+> produces `Ctrl + ` with an **invisible trailing space**, which tells the user nothing.
+>
+> SiYuan filters plugin-declared hotkeys: anything with a `⌃` / `⌥` / `⌘` prefix is allowed through;
+> only bare single characters without a modifier get cleared. Both bindings work.
 
 Keys the map deliberately **never** steals: `Ctrl + S` / `P` / `W` / `R`, `Ctrl + Z` / `Y` (undo is left
-to SiYuan's own stack), `F5` / `F11` / `F12`, and **anything with `⌥` (Alt) held** — that namespace is
-shared with SiYuan and other plugins, and this plugin's own `Alt + Cmd + D` / `Alt + Cmd + V` live in it.
+to SiYuan's own stack), `F5` / `F11` / `F12`, and **every `⌥⌘` combination** — that namespace is shared
+with SiYuan and other plugins, so the map yields the whole family.
+(The plugin's own two global hotkeys are `⌘ Space` / `⌥ Space`, which are **not** in that family —
+they only take the global path while the map has *not* grabbed the keyboard, so the two never fight.)
 
 The toolbar on the map offers layout switching, status filters, zoom controls, fit-to-canvas, fold/expand all, export, fullscreen and exit.
 
@@ -91,12 +117,25 @@ It coexists with the *Custom Block* plugin — the two use separate attribute na
 
 ## Settings
 
-The settings panel covers the default layout, connector style, theme, numbering, branch colours, wheel behaviour,
-auto-fit, in-map keyboard control, lazy rendering, the minimap and per-document view preferences.
+The settings panel is organised as **side tabs**, grouped by purpose so you don't hunt through one long list:
 
-It also has a **Copy diagnostics** button: it copies the plugin version, kernel version, a config snapshot, the state of
-every mounted map and the most recent plugin warnings to the clipboard, so you can paste it into a bug report.
-It only writes to the clipboard — **no network calls, no telemetry**.
+| Tab | What lives there | Items |
+| --- | --- | --- |
+| **Appearance** | What the map looks like | Theme, default layout, connector style, branch colours, custom branch colours, level numbering, compact mode, layout animation |
+| **Canvas** | How big the canvas is and how it auto-frames | Canvas height, canvas height (px), auto-fit, auto-columns for logic charts, minimap, always show minimap |
+| **Interaction** | Mouse and keyboard behaviour | Double-click to edit, drag to restructure, hover preview for folded nodes, in-map keyboard control, `Ctrl + wheel` zoom, wheel to pan, per-document view preferences, fold state syncs with the outline |
+| **Performance** | Trade-offs on large documents | Lazy rendering, compact-mode threshold, render cap |
+| **Help** | Troubleshooting and migration | View shortcuts, copy diagnostics, migrate Custom Block marks |
+
+Worth calling out:
+
+- **View shortcuts** opens a **grouped table dialog** — two columns ("Key | Action"), 12 groups, 37 rows —
+  instead of a toast that disappears after a dozen seconds. Key names are converted per platform
+  (Windows shows `Ctrl + Space`, macOS shows `⌘ + Space`), and rows with no key at all
+  (clicking a checkbox, using the right-click menu) say "menu action" explicitly rather than being left blank.
+- **Copy diagnostics** copies the plugin version, kernel version, a config snapshot, the state of
+  every mounted map and the most recent plugin warnings to the clipboard, so you can paste it into
+  a bug report. It only writes to the clipboard — **no network calls, no telemetry**.
 
 ## Development
 
@@ -123,7 +162,7 @@ Place this folder under `{workspace}/data/plugins/`; SiYuan loads `index.js` and
 
 `.github/workflows/release.yml` runs on every push to `main`:
 
-1. `npm run check` — 8 static gates + 312 unit assertions + 96 package smoke assertions
+1. `npm run check` — 8 static gates + 317 unit assertions + 96 package smoke assertions
 2. builds `package.zip` and verifies it contains the required files
 3. creates a GitHub Release tagged `v<version>` — **only if that release does not exist yet** (idempotent)
 
@@ -194,7 +233,8 @@ Below that version, batch check/uncheck fails.
 > *all* kernel APIs the plugin uses, not the first one you happen to look at.
 
 > It used to say `3.1.0` — a value with **no basis at all**. Development and acceptance
-> were done entirely on **SiYuan 3.8.4** (all six empirical notes in the source say 3.8.4).
+> were done entirely on **SiYuan 3.8.x** (starting from 3.8.4, later re-run in full on **3.8.5**;
+> the empirical notes in the source are labelled with those versions).
 > If you prefer to be more conservative, raise `minAppVersion` to `3.8.4`: that admits
 > only the tested version, at the cost of excluding older users.
 

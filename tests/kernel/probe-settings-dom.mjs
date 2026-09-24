@@ -4,6 +4,13 @@
  * 目的：P1-5 的验收要走「点顶栏图标 → 点菜单里的设置 → 点复制按钮」这条真路，
  * 而这两处的类名（思源的 Setting 渲染成什么、addTopBar 挂在哪）不能靠记忆猜。
  *
+ * ⚠️ 面板现在是**侧边分区**的：思源的 `Setting` 只渲染一个扁平列表，分区是插件
+ * 自己在 `open()` 之后把 `.b3-dialog__content` 的子元素搬进 `.mm-set__pane` 做出来的
+ * （见 `core/settings-tabs.ts`）。所以第 3b 段要同时看两件事：
+ *   · `tabs` / `panes` 的形状对不对；
+ *   · `orphanInContent` 必须是 **0** —— 不为 0 就说明有设置项没被搬走（等于丢了）。
+ * 分区行为本身的验收在 `diag-settings-tabs.mjs`。
+ *
  * 用法：node tests/kernel/probe-settings-dom.mjs
  */
 import fs from "node:fs";
@@ -60,6 +67,24 @@ try {
     })()`);
     console.log("点中了设置:", hit);
     await sleep(1400);
+
+    console.log("\n=== 3b. 侧边分区结构（插件自己重排出来的）===");
+    const tabs = await page.eval(`(() => {
+        const d = document.querySelector('.b3-dialog--open') || document.querySelector('.b3-dialog');
+        if (!d) return { err: 'no dialog' };
+        const content = d.querySelector('.b3-dialog__content');
+        return {
+            tabs: [...d.querySelectorAll('.mm-set__tab')].map((t) => ({ label: (t.textContent || '').trim(), group: t.dataset.group, on: t.classList.contains('mm-set__tab--on') })),
+            panes: [...d.querySelectorAll('.mm-set__pane')].map((p) => ({
+                group: p.dataset.group,
+                on: p.classList.contains('mm-set__pane--on'),
+                rows: [...p.querySelectorAll(':scope > .config-item .config-name')].map((e) => (e.textContent || '').trim()),
+            })),
+            // 改造成功时这里应该是 0：所有设置项都被搬进 pane 了
+            orphanInContent: content ? content.querySelectorAll(':scope > .config-item').length : -1,
+        };
+    })()`);
+    console.log(JSON.stringify(tabs, null, 1).slice(0, 4000));
 
     const dlg = await page.eval(`(() => {
         const d = document.querySelector('.b3-dialog--open') || document.querySelector('.b3-dialog');

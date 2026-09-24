@@ -165,6 +165,16 @@ const DIAG_ITEM = `(() => {
     if (!d) return { err: 'no dialog' };
     const l = [...d.querySelectorAll('.b3-label')].find((x) => (x.textContent || '').includes('只复制到剪贴板'));
     if (!l) return { err: 'no diag item' };
+    /* ⚠️ 面板现在是**侧边分区**的（见 core/settings-tabs.ts），「复制诊断信息」在「帮助」里。
+       非当前分区的 pane 是 display:none —— 里面的按钮 rect 全是 0，
+       而本文件用的是**真实鼠标点击**（clickAt），于是点击会静默落在 (0,0)，
+       表现为「按钮文案没变、没弹提示、剪贴板是空的」—— 看着像插件坏了，
+       其实是探针点了个不存在的位置。所以先把它所在的分区切出来。 */
+    const pane = l.closest('.mm-set__pane');
+    if (pane && !pane.classList.contains('mm-set__pane--on')) {
+        const tab = [...d.querySelectorAll('.mm-set__tab')].find((t) => t.dataset.group === pane.dataset.group);
+        if (tab) tab.click();
+    }
     const b = l.querySelector('button');
     if (!b) return { err: 'no button' };
     b.scrollIntoView({ block: 'center' });
