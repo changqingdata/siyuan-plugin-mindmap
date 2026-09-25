@@ -635,17 +635,23 @@ try {
     // ★ 键位写法必须与**平台**一致，且空格必须**看得见**。
     //
     // 两件事叠在这里，都是只有真机能验的：
-    //  ① 思源的键位表示法是 macOS 字形（`⌘ ` / `⌥ `），而思源自己的菜单在 Windows 上
+    //  ① 思源的键位表示法是 macOS 字形（`⇧⌘D`），而思源自己的菜单在 Windows 上
     //     显示的是 `Ctrl+...`（实测：主菜单里「魔法排版」显示 `Ctrl+Alt+P`，
-    //     其 keymap 存值正是 `⌥⌘P`）。说明文字若写死 `⌘`/`⌥`，Windows 用户看到的就是
+    //     其 keymap 存值正是 `⌥⌘P`）。说明文字若写死字形，Windows 用户看到的就是
     //     一套在自己「设置 → 快捷键」里根本找不到的符号。
-    //  ② 空格在思源的键位串里是**一个字面空格**（`KEYCODELIST[32] = " "`，
-    //     即 `Ctrl+空格` 的键位串是 `"⌘ "`）。不换算就渲染成看不见的 `Ctrl+ `，
-    //     用户完全读不出该按什么。
+    //  ② 空格在思源的键位串里是**一个字面空格**（`KEYCODELIST[32] = " "`）。
+    //     不换算就渲染成看不见的 `Ctrl+ `，用户完全读不出该按什么。
     //
-    // 断言范围要**收窄到全局那两行**：第一版写成对整段弹层扫 `/[⌥⌘]/`，
+    // ⚠️ 默认键位换过三轮：`⌥⌘D` → `⌘空格`/`⌥空格`（死在 OS/IME）→ `⇧⌘D`/`⇧⌘S`
+    // （`⇧⌘S` 死在 Protyle 的 stopPropagation）→ **`⇧⌘D`/`⇧⌘B`**
+    // （中间那版被 Windows / 输入法层吃掉，结论见 `probe-keymap-dump.mjs` 文件头）。
+    // 换键位后**第 ② 条断言不能跟着删** —— 速查里仍有走 `{space}` 占位符的行
+    // （折叠 / 展开、演示推进）。所以现在把它钉在**含「空格」二字的那些行**上，
+    // 而不是钉在全局那两行（那会变成真空断言）。
+    //
+    // 断言范围要**收窄**：第一版写成对整段弹层扫 `/[⌥⌘]/`，
     // 结果被「聚焦：Ctrl / ⌘ + 双击节点」这行判红 —— 那是**故意的跨平台写法**
-    // （两种都给出），本身没问题。所以只对全局行断言，且只禁 `⌥`：
+    // （两种都给出），本身没问题。所以只禁 `⌥`：
     // `⌘` 在「Ctrl / ⌘」这类跨平台写法里是合法的，`⌥` 则没有任何合法用途。
     const isMac = await page.eval(`!!(window.siyuan && window.siyuan.config && window.siyuan.config.system && window.siyuan.config.system.os === 'darwin')`);
     const scPairs = await page.eval(`[...document.querySelectorAll('.b3-dialog--open .mm-sc__row')].map((r) => ({
@@ -655,14 +661,17 @@ try {
     const toggleRow = scPairs.find((r) => /把光标所在的列表切换为导图/.test(r.d)) || { k: "", d: "" };
     const sideRow = scPairs.find((r) => /并排面板打开导图/.test(r.d)) || { k: "", d: "" };
     ok(
-        /空格/.test(toggleRow.k) && !/\s$/.test(toggleRow.k),
-        "★ 键位里的空格渲染成了**可见**的「空格」，没有尾随空白（否则用户看到的是 `Ctrl+ `）",
-        JSON.stringify(toggleRow.k),
-    );
-    ok(
-        isMac ? /^⌘空格$/.test(toggleRow.k) && /^⌥空格$/.test(sideRow.k) : toggleRow.k === "Ctrl+空格" && sideRow.k === "Alt+空格",
-        "★ 全局键位按平台换算（Windows：Ctrl+空格 / Alt+空格；macOS：⌘空格 / ⌥空格）",
+        isMac ? toggleRow.k === "⇧⌘D" && sideRow.k === "⇧⌘B" : toggleRow.k === "Ctrl+Shift+D" && sideRow.k === "Ctrl+Shift+B",
+        "★ 全局键位按平台换算（Windows：Ctrl+Shift+D / Ctrl+Shift+B；macOS：⇧⌘D / ⇧⌘B）",
         `os=${isMac ? "darwin" : "win/linux"}｜${JSON.stringify(toggleRow.k)} / ${JSON.stringify(sideRow.k)}`,
+    );
+    const spaceRows = scPairs.filter((r) => /空格/.test(r.k));
+    ok(spaceRows.length >= 2, "★ 速查里仍有走 `{space}` 占位符的行（折叠 / 演示推进）", spaceRows.map((r) => r.k).join(" / "));
+    const badSpace = spaceRows.filter((r) => /\s$/.test(r.k));
+    ok(
+        badSpace.length === 0,
+        "★ 那些行的空格渲染成了**可见**的「空格」，没有尾随空白（否则用户看到的是 `Ctrl+ `）",
+        badSpace.map((r) => JSON.stringify(r.k)).join(" ") || "(无)",
     );
     const optionGlyphAnywhere = scPairs.some((r) => r.k.includes("⌥"));
     ok(isMac || !optionGlyphAnywhere, "★ Windows 上整份速查不出现 ⌥（那是 macOS 字形）", `含 ⌥ 的行 ${scPairs.filter((r) => r.k.includes("⌥")).length} 条`);

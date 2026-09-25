@@ -87,6 +87,8 @@
     "probe:i18nrender": "node tests/kernel/probe-i18n-render.mjs",
     "probe:ids": "node tests/kernel/probe-id-reconcile.mjs",
     "probe:keymap": "node tests/kernel/probe-keymap-display.mjs",
+    "probe:keymapdump": "node tests/kernel/probe-keymap-dump.mjs",
+    "probe:hotkeydelivery": "node tests/kernel/probe-hotkey-delivery.mjs",
     "probe:markerlag": "node tests/kernel/probe-marker-lag.mjs",
     "probe:mobile": "node tests/kernel/probe-mobile-touch.mjs",
     "probe:mobiletap": "node tests/kernel/probe-mobile-tap.mjs",

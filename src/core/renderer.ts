@@ -15,6 +15,7 @@ import type {
     MMSearchHit,
     MMTheme,
     MMThemeId,
+    MMTransientState,
     MMViewPrefs,
 } from "../types";
 import { EDIT_FLAG, FILTER_LABEL } from "../types";
@@ -89,6 +90,14 @@ export interface ViewCallbacks {
     onBatchAction: (kind: MMBatchKind, nodes: MMNode[]) => Promise<MMActionResult> | void;
     /** 视图偏好（布局 / 主题 / 连线 / 缩放）变了，交给外部决定要不要写进文档 */
     onViewPrefs: (prefs: MMViewPrefs) => void;
+    /**
+     * 瞬态状态（搜索框开着没有 / 查询串 / 当前第几条）变了。
+     *
+     * **可选**，而且只有「挂在 `.list` 里」的行内视图需要接 ——
+     * 它会被 Protyle 换掉 `.list` 时连根摘除、随后重建，状态不存就丢。
+     * 全屏弹层 / 并排面板挂在 `body` 上，不受影响（见 `MMTransientState` 的注释）。
+     */
+    onTransient?: (s: MMTransientState) => void;
     /** 打开一个块（双链的目标）—— 一般是打开它所在的页签 */
     onOpenBlock: (id: string) => void;
     /**
@@ -122,6 +131,24 @@ const DRAG_THRESHOLD = 4;
 
 /** 拖拽悬停多久自动展开折叠节点 */
 const HOVER_EXPAND_DELAY = 420;
+/**
+ * 搜索时「跳到命中项」的防抖延迟。
+ *
+ * ## 为什么必须防抖（不是「手感调优」，是**功能性**的）
+ *
+ * `gotoHit()` 要展开命中的祖先 → 整树 `render()`。而导图是渲染在
+ * **Protyle 的可编辑块内部**的，这一次大改 DOM 会让 Protyle 重建整个 `.list` ——
+ * 旧元素连同 `.mm-root`、**连同搜索输入框**一起脱离文档，插件随后再挂回来。
+ *
+ * 实测（64 节点、命中藏在折叠子树里）：
+ *   · 那一轮重建里主线程被**同步占用 1.6 秒**（`longtask` 量到的）；
+ *   · 期间敲进去的字符**全部落空** —— 零间隔连打 15 个字符，框里只剩 1 个。
+ *
+ * 所以「每敲一个字就跳一次」= 每个字都可能把输入框摘走一次。
+ * 防抖到停手之后再跳，连续打字就完全不会触发重建。
+ * 顺带也是更好的交互：每敲一个字就重新取景，画面会晃得没法看。
+ */
+const SEARCH_JUMP_DELAY = 400;
 /** 拖拽到边缘多少像素内开始自动滚动 */
 const AUTO_SCROLL_MARGIN = 34;
 const AUTO_SCROLL_SPEED = 9;
@@ -440,6 +467,8 @@ export class MindMapView {
     private searchHits: string[] = [];
     private searchIdx = -1;
     private searchOpen = false;
+    /** 打字期间那次「跳到命中项」的防抖定时器 —— 见 `SEARCH_JUMP_DELAY` */
+    private gotoHitTimer: number | null = null;
 
     /* -------------------------------------------------- 过滤器（P1-1） */
 
@@ -587,6 +616,7 @@ export class MindMapView {
     /** 哪些项是「用户显式改过」的，只有这些才写进文档 */
     private prefsDirty = new Set<keyof MMViewPrefs>();
 
+
     constructor(
         listEl: HTMLElement,
         options: MMConfig,
@@ -674,6 +704,10 @@ export class MindMapView {
     destroy() {
         if (this.destroyed) return;
         this.destroyed = true;
+        if (this.gotoHitTimer !== null) {
+            window.clearTimeout(this.gotoHitTimer);
+            this.gotoHitTimer = null;
+        }
         this.editing = null;
         this.dragging = null;
         this.pendingDrop = null;
@@ -1665,7 +1699,10 @@ export class MindMapView {
         /* --- 5. 尺寸与视图 --- */
         this.resizeViewport(box.h);
         this.refreshSelection();
-        this.applySearchMarks();
+        /* 树重建了 → 命中集合也要跟着重算（见 `refreshSearchOnRender`）。
+           这里以前直接 `applySearchMarks()`，等于拿**旧树的 id** 往新树上贴 class ——
+           重建之后「计数说 1/1、画面一个高亮都没有」就是这么来的。 */
+        this.refreshSearchOnRender();
         this.refreshBreadcrumb();
 
         // 首次渲染一定自适应；之后只有用户主动改结构时才重置视图。
@@ -2183,7 +2220,7 @@ export class MindMapView {
         }
         for (const n of nodes) {
             n.folded = folded;
-            if (n.id) this.cb.onFoldChange(n.id, folded);
+            if (n.id) this.writeFold(n.id, folded);
         }
         this.render();
         this.reclampView();
@@ -3321,10 +3358,26 @@ export class MindMapView {
         return list;
     }
 
+    /**
+     * 折叠态写回内核的统一出口。
+     *
+     * ⚠️ **曾经在这里试过「搜索框开着就只记不写」**，想把那次写回推到搜索结束 ——
+     * 目的是别让写内核触发的重建打断用户打字。实测**反效果**，已回退：
+     *   · 重建根本不是那次写回引起的，是**插件自己 render 出来的 DOM 变动**
+     *     让 Protyle 重建了那个块（所以不写也照样重建，白搭）；
+     *   · 而写回一旦延后，「搜索命中自动展开祖先」就**跨不过重建**——
+     *     新视图按内核里的旧折叠态解析，展开白做了（`shownCount` 不涨）。
+     * 留着这层间接调用只是为了保留上面这段结论，避免下一个人再试一遍。
+     */
+    private writeFold(nodeId: string, folded: boolean) {
+        if (!nodeId) return;
+        this.cb.onFoldChange(nodeId, folded);
+    }
+
     private toggleFold(n: MMNode) {
         this.disarmPreview();
         n.folded = !n.folded;
-        if (n.id) this.cb.onFoldChange(n.id, n.folded);
+        if (n.id) this.writeFold(n.id, n.folded);
         this.render();
         // 折叠一个很大的子树之后，画布会明显小于视口 —— 不重新居中的话
         // 整张图会缩在原来那个角落里。
@@ -3337,7 +3390,7 @@ export class MindMapView {
         const walk = (n: MMNode) => {
             if (n.children.length > 0 && n !== root) {
                 n.folded = folded;
-                if (n.id) this.cb.onFoldChange(n.id, folded);
+                if (n.id) this.writeFold(n.id, folded);
             }
             n.children.forEach(walk);
         };
@@ -3527,19 +3580,33 @@ export class MindMapView {
          * 「导图自己的 Ctrl / Cmd 快捷键」的判据 —— 必须**排除按住 Alt 的情况**。
          *
          * `⌥⌘X` 是思源与别的插件共用的命名空间：本工作空间里 flowmind 占了 ⌥⌘K / ⌥⌘L、
-         * 魔法排版占了 ⌥⌘P，本插件自己也把「切换导图 / 大纲」绑在 ⌥⌘D、
-         * 「并排打开」绑在 ⌥⌘V。
-         *
-         * 只判 `mod` 的话，导图有焦点时按 ⌥⌘D 会命中下面的 `Ctrl+D`（复制节点）——
-         * 实测后果很扎眼：**全局切换键没生效，反而把选中节点的子树复制一份写进了内核**
-         * （6 个节点变 12 个），而且没有任何提示。同理 ⌥⌘V 会变成「粘贴」。
+         * 魔法排版占了 ⌥⌘P。只判 `mod` 的话，别的插件的 ⌥⌘ 组合会被这里吃掉。
          */
         const modOnly = mod && !e.altKey;
+        /**
+         * 字母类快捷键还要**再排除 Shift**，理由见下。
+         *
+         * 本插件自己的两个全局热键是 `⇧⌘D`（切换导图 / 大纲）与 `⇧⌘B`（并排打开），
+         * 而下面这批字母快捷键是 `Ctrl+D`（复制）、`Ctrl+V`（粘贴）、`Ctrl+A`（全选同级）…
+         *
+         * 只判 `modOnly` 的话，导图有焦点时按 `⇧⌘D` 会命中 `Ctrl+D` ——
+         * 实测后果很扎眼：**全局切换键没生效，反而把选中节点的子树复制一份写进了内核**
+         * （6 个节点变 12 个），而且没有任何提示。同理 `⇧⌘V` 会变成「粘贴」。
+         * 历史上 `⌥⌘D` / `⌥⌘V` 当默认键位时踩过一模一样的坑，只是当年靠 `!e.altKey` 挡住的。
+         *
+         * ⚠️ **符号键（`= - 0 1`）与方向键仍然用 `modOnly`** —— 它们没有 `⇧⌘` 版本，
+         * 加 Shift 判据只会白白削弱功能（`⇧⌘=` 放大是个很自然的按法）。
+         */
+        const modLetter = modOnly && !e.shiftKey;
         const key = e.key;
 
         // 白名单：系统级 / 浏览器级快捷键一律放行
         if (mod && !e.altKey) {
             const lower = key.toLowerCase();
+            // ⚠️ 这里放行的是 `Ctrl+S/P/W/R`（保存 / 打印 / 关标签 / 替换）。
+            // **别把插件自己的全局热键绑到这几个字母的 `⇧⌘` 变体上** ——
+            // 实测 `⇧⌘S` 会被 Protyle 在中途 `stopPropagation()`，
+            // 思源的全局匹配器（挂在 document 冒泡）根本收不到，绑了也不会触发。
             if (lower === "s" || lower === "p" || lower === "w" || lower === "r") return;
             // 撤销 / 重做：思源的 Ctrl+Z **管不到块 API 写出来的内容**
             // （它的事务里 undoOperations 恒为空数组，前端不会把它压进撤销栈），
@@ -3591,7 +3658,7 @@ export class MindMapView {
         if (modOnly && key === "-") return take(() => this.zoomAt(1 / 1.2));
         if (modOnly && key === "0") return take(() => this.fit());
         if (modOnly && key === "1") return take(() => this.setScale(1));
-        if (modOnly && key.toLowerCase() === "f") return take(() => this.toggleSearch(true));
+        if (modLetter && key.toLowerCase() === "f") return take(() => this.toggleSearch(true));
         if (!mod && !e.altKey && (key === "f" || key === "F") && this.mode === "inline") {
             if (!this.tree) return;
             return take(() => this.cb.onFullscreen(this.tree!, resolveTheme(this.options.theme)));
@@ -3674,17 +3741,17 @@ export class MindMapView {
         if (e.shiftKey && key === "Tab") return take(() => void this.runAction("outdent", cur));
         if (modOnly && key === "ArrowUp") return take(() => void this.runAction("moveUp", cur));
         if (modOnly && key === "ArrowDown") return take(() => void this.runAction("moveDown", cur));
-        if (modOnly && key.toLowerCase() === "a") return take(() => this.selectAllSiblings());
-        if (modOnly && key.toLowerCase() === "d") return take(() => void this.runAction("duplicate", cur));
-        if (modOnly && key.toLowerCase() === "c") {
+        if (modLetter && key.toLowerCase() === "a") return take(() => this.selectAllSiblings());
+        if (modLetter && key.toLowerCase() === "d") return take(() => void this.runAction("duplicate", cur));
+        if (modLetter && key.toLowerCase() === "c") {
             return take(() => void this.copySubtree(cur));
         }
-        if (modOnly && key.toLowerCase() === "v") {
+        if (modLetter && key.toLowerCase() === "v") {
             if (!this.clipboard) return;
             const data = this.clipboard;
             return take(() => void this.runAction("paste", cur, { data }));
         }
-        if (modOnly && key.toLowerCase() === "x") {
+        if (modLetter && key.toLowerCase() === "x") {
             return take(() => {
                 this.clipboard = serializeSubtree(cur);
                 void this.copyNodeText(cur);
@@ -4312,7 +4379,7 @@ export class MindMapView {
                 this.markHoverExpand(null);
                 if (this.dragging && this.pendingDrop?.target === target) {
                     target.folded = false;
-                    if (target.id) this.cb.onFoldChange(target.id, false);
+                    if (target.id) this.writeFold(target.id, false);
                     this.render();
                 }
             }, HOVER_EXPAND_DELAY);
@@ -4493,25 +4560,21 @@ export class MindMapView {
         return hay;
     }
 
-    private runSearch(q: string) {
-        const root = this.tree;
-        this.searchHits = [];
+    private runSearch(q: string, jump = true) {
         const needle = q.trim().toLowerCase();
-        if (root && needle) {
-            const walk = (n: MMNode) => {
-                // 被过滤器筛掉的节点不参与命中 ——
-                // 「只看未完成」+ 搜索的语义是「在我筛出来的范围里搜」，
-                // 否则会出现「计数说 3 条，画面上一个高亮都看不见」。
-                if (n.hidden) return;
-                if (n.id && this.searchHay(n).includes(needle)) this.searchHits.push(n.id);
-                n.children.forEach(walk);
-            };
-            walk(root);
-        }
+        this.searchHits = this.recomputeHits(needle);
         this.searchIdx = this.searchHits.length > 0 ? 0 : -1;
         this.updateSearchCount();
         this.applySearchMarks();
-        if (this.searchIdx >= 0) this.gotoHit();
+        /* ⚠️ `jump=false` 是**视图重建后恢复**专用的。
+           恢复时再 `gotoHit()` 有两个坏处：
+             · 用户已经看过那个命中了，视图会再滚一次；
+             · `gotoHit()` 会写内核（展开祖先）→ Protyle 再换一次 `.list`
+               → 视图再重建 → 再恢复 → **转起来**。
+           所以恢复路径必须不跳转。
+           ⚠️ 打字路径走**防抖**（`scheduleGotoHit`），不是直接跳 —— 理由见
+           `SEARCH_JUMP_DELAY`：直接跳会让每个字符都有机会把输入框一起摘走。 */
+        if (jump && this.searchIdx >= 0) this.scheduleGotoHit();
 
         // 跨图范围：本图的命中照旧画在画布上，另外异步补一份文档级结果
         if (this.searchAll) this.runDocSearch(needle);
@@ -4519,6 +4582,45 @@ export class MindMapView {
             this.docHits = [];
             this.renderDocResults();
         }
+    }
+
+    /** 按**当前的树**重算命中集合。只算，不动 UI、不跳转、不汇报。 */
+    private recomputeHits(needle: string): string[] {
+        const root = this.tree;
+        const hits: string[] = [];
+        if (!root || !needle) return hits;
+        const walk = (n: MMNode) => {
+            // 被过滤器筛掉的节点不参与命中 ——
+            // 「只看未完成」+ 搜索的语义是「在我筛出来的范围里搜」，
+            // 否则会出现「计数说 3 条，画面上一个高亮都看不见」。
+            if (n.hidden) return;
+            if (n.id && this.searchHay(n).includes(needle)) hits.push(n.id);
+            n.children.forEach(walk);
+        };
+        walk(root);
+        return hits;
+    }
+
+    /**
+     * 树重建之后刷新搜索：**重算命中集合**再画高亮。
+     *
+     * 为什么不能只 `applySearchMarks()`：
+     * 命中集合是「树 × 查询串」的函数，而树每次 `render()` 都是重建的。
+     * 不重算会出现两种都很扎眼的后果 ——
+     *   · 计数说「1/1」而画面上一个高亮都没有（`searchHits` 里的 id 已经不是新树里的节点）；
+     *   · 更糟的是**恢复搜索状态**时：那一刻 Protyle 可能还没把折叠子树填进 DOM，
+     *     按残缺的树算出「无结果」，然后这个空结果被当成结论记住。
+     * 位置按**块 ID**保住（不是下标），所以上下条翻到第几条不会因为重建而跳回第一条。
+     */
+    private refreshSearchOnRender() {
+        if (this.searchOpen && this.searchInput.value.trim()) {
+            const prev = this.searchHits[this.searchIdx];
+            this.searchHits = this.recomputeHits(this.searchInput.value.trim().toLowerCase());
+            const i = prev ? this.searchHits.indexOf(prev) : -1;
+            this.searchIdx = i >= 0 ? i : this.searchHits.length > 0 ? 0 : -1;
+            this.updateSearchCount();
+        }
+        this.applySearchMarks();
     }
 
     /**
@@ -4568,14 +4670,85 @@ export class MindMapView {
         if (this.searchAll) {
             const n = this.docHits.length;
             this.searchCount.textContent = !this.searchInput.value.trim() ? "" : n === 0 ? this.t("search.noResult", "无结果") : this.t("search.countN", "{n} 条", { n });
+            this.reportTransient();
             return;
         }
         const n = this.searchHits.length;
         this.searchCount.textContent = n === 0 ? (this.searchInput.value ? this.t("search.noResult", "无结果") : "") : `${this.searchIdx + 1}/${n}`;
+        this.reportTransient();
+    }
+
+    /**
+     * 汇报瞬态状态（目前只有搜索）。Scanner 按 listId 存一份，供**视图重建后**恢复。
+     *
+     * 挂在 `updateSearchCount()` 里是**有意的**：搜索状态每一次提交
+     * （开 / 关 / 改查询串 / 上下条 / 换范围 / 从跨图结果里挑一条）
+     * 都会走到这里，所以这里是唯一一个「一定被调到」的收口点。
+     * 散在七八个调用点上的话，漏一个就少一种状态能活过重建。
+     */
+    private reportTransient() {
+        this.cb.onTransient?.({
+            searchOpen: this.searchOpen,
+            query: this.searchInput?.value ?? "",
+            idx: this.searchIdx,
+            searchAll: this.searchAll,
+        });
+    }
+
+    /**
+     * 恢复瞬态状态。由 Scanner 在**视图重建之后**调用（见 `MMTransientState` 的注释）。
+     *
+     * ⚠️ 用 `runSearch(q, false)`（不跳转）—— 理由见 `runSearch` 里那段注释，
+     * 简单说：跳转会写内核，写了内核就会再重建，重建了又恢复 —— 无限循环。
+     */
+    applyTransient(s?: MMTransientState) {
+        if (!s || this.destroyed) return;
+        // 范围开关先还原：`runSearch` 的跨图分支要读它
+        this.searchAll = !!s.searchAll;
+        this.scopeBtn.textContent = this.searchAll ? this.t("search.scopeAll", "全文档") : this.t("search.scopeHere", "本图");
+        this.scopeBtn.classList.toggle("mm-on", this.searchAll);
+        if (!s.searchOpen) return;
+        this.searchOpen = true;
+        this.searchEl.classList.add("mm-search--on");
+        this.searchInput.value = s.query;
+        this.runSearch(s.query, false);
+        // 位置也要还原：runSearch 会把它重置成第一条
+        if (s.idx > 0 && s.idx < this.searchHits.length) {
+            this.searchIdx = s.idx;
+            this.updateSearchCount();
+            this.applySearchMarks();
+        }
+        /* 焦点还给输入框：重建前用户正在这里打字，重建后焦点不该被
+           「谁最后碰过 DOM」决定 —— 否则用户得再点一次才能继续输入。 */
+        this.searchInput.focus();
+        const end = this.searchInput.value.length;
+        try {
+            this.searchInput.setSelectionRange(end, end);
+        } catch {
+            /* 输入框类型不允许选范围就算了，光标位置不值得为它抛异常 */
+        }
     }
 
     /** 命中项可能在折叠的子树里，先展开祖先 */
+    /**
+     * 安排一次「跳到当前命中」（打字防抖）。**只有打字路径用它** ——
+     * 上下条 / 回车是用户明确的动作，走 `gotoHit()` 立即跳。
+     * 为什么要防抖见 `SEARCH_JUMP_DELAY` 的注释。
+     */
+    private scheduleGotoHit() {
+        if (this.gotoHitTimer !== null) window.clearTimeout(this.gotoHitTimer);
+        this.gotoHitTimer = window.setTimeout(() => {
+            this.gotoHitTimer = null;
+            this.gotoHit();
+        }, SEARCH_JUMP_DELAY);
+    }
+
     private gotoHit() {
+        // 手动跳一次就把待办的那次撤掉，免得停手后又跳一下
+        if (this.gotoHitTimer !== null) {
+            window.clearTimeout(this.gotoHitTimer);
+            this.gotoHitTimer = null;
+        }
         const id = this.searchHits[this.searchIdx];
         if (!id) return;
         let hit = this.byId.get(id);
@@ -4585,7 +4758,7 @@ export class MindMapView {
         while (cur) {
             if (cur.folded) {
                 cur.folded = false;
-                if (cur.id) this.cb.onFoldChange(cur.id, false);
+                if (cur.id) this.writeFold(cur.id, false);
                 unfolded = true;
             }
             cur = cur.parent;
@@ -5071,6 +5244,56 @@ export class MindMapView {
             this.hideTip();
             this.disarmPreview();
         });
+
+        /* ---- ★★ 把「插件 UI 里的事件」挡在这里，不许冒泡给 Protyle ----
+         *
+         * 这不是洁癖，是**数据安全**。行内模式下整个 `.mm-root` 就住在
+         * Protyle 的可编辑块内部（`.list` 里），而源大纲是靠
+         * `.mm-source-hidden > :not(.mm-root) { display: none }` 藏起来的。
+         *
+         * 于是只要有一个事件冒泡到 `.protyle-wysiwyg`，Protyle 就会认为
+         * 「这个块的内容被改过了」，然后**从 DOM 重新序列化这个块** ——
+         * 而序列化时看不见那些 `display:none` 的源大纲，只看得见导图，
+         * 结果就是：**笔记正文被换成导图渲染出来的 HTML**。
+         *
+         * 实测（`tests/.build/_diag-whyswap.mjs`，磁盘 `.sy` 为证）：
+         *   在搜索框里敲字之后，每个列表项的段落都变成了
+         *     `NodeHTMLBlock` / `Data = "<div contenteditable="false">…</div>"`
+         *   原始段落整个消失 —— 大纲结构被毁，而且**测试全绿**，
+         *   因为文字还留在 HTML 块里，导图读出来一模一样。是最难发现的那种损坏。
+         *
+         * 到底哪一个事件是引信，用对照实验分得很清（同一支探针的几种模式）：
+         *   · 只 Ctrl+F 开搜索框、不打字            → 干净
+         *   · 只给 `.mm-node` 加 class（poke）      → 干净
+         *   · 只改计数文字 `.mm-search-count`（poke2）→ 干净
+         *   · 计数文字 + 命中高亮，两样一起（poke4） → 干净
+         *   · 只点缩放按钮（zoom）                  → 干净
+         *   · **程序化派发一个 `input` 事件**（prog）→ **损坏**
+         * ⇒ 引信就是 **`input` 事件本身**（`prog` 与 poke2/poke4 唯一的差别），
+         *   不是「插件改了 DOM」，也不是键盘事件、几何变化、gotoHit 写内核。
+         *
+         * ⚠️ 必须挂在**冒泡阶段**（就是 `on` 的默认行为），**不能挂捕获**：
+         * 捕获阶段的 `stopPropagation()` 会让事件**根本到不了输入框自己**，
+         * 插件自己的 `searchInput.oninput` 就永远不触发了 —— 搜索框直接变哑巴。
+         * 挂在 `.mm-root` 冒泡阶段则刚好：目标元素上的监听器（插件的 `oninput`、
+         * 行内编辑器的 `keydown` / `paste`）先跑完，再拦住它继续往上走。
+         *
+         * ⚠️ **刻意不拦 `keydown` / `keypress`**：思源的全局快捷键匹配器挂在
+         * `document` 冒泡阶段，拦掉 `keydown` 会让 `Ctrl+S` 这类系统快捷键
+         * 在导图有焦点时失效。`keyup` 拦掉是安全的（匹配器看的是 keydown）。
+         */
+        for (const type of [
+            "input",
+            "beforeinput",
+            "compositionstart",
+            "compositionupdate",
+            "compositionend",
+            "paste",
+            "cut",
+            "keyup",
+        ]) {
+            on(this.rootEl, type, (e: Event) => e.stopPropagation());
+        }
 
         // 大纲 ↔ 导图 双向高亮（P2-1）
         this.bindOutlineCursor();

@@ -286,49 +286,106 @@ class Page {
 
 export async function launch({ port = 9333, headless = true, gpu = false, width = 1600, height = 1000, dpr = 1 } = {}) {
     const exe = findChrome();
-    const profile = fs.mkdtempSync(path.join(os.tmpdir(), "mm-cdp-"));
-    const args = [
-        `--remote-debugging-port=${port}`,
-        `--user-data-dir=${profile}`,
-        `--window-size=${width},${height}`,
-        `--force-device-scale-factor=${dpr}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-timer-throttling",
-        "--disable-renderer-backgrounding",
-        "--disable-features=Translate,MediaRouter",
-        "--hide-scrollbars",
-    ];
-    if (headless) args.unshift("--headless=new");
-    if (gpu) args.push("--enable-gpu", "--use-angle=d3d11", "--ignore-gpu-blocklist");
-    else args.push("--disable-gpu");
-    args.push("about:blank");
 
-    // ⚠️ stderr 要接住。原来写的是 `stdio: "ignore"` —— 于是「端口未就绪」这句
-    // 什么都不说明：Chrome 是没起来？崩了？还是参数不认？全看不到。
-    // 实测踩过：连着两次「端口未就绪」，因为没有 stderr，只能靠猜。
-    const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+    /* ⚠️⚠️ Windows 上端口会「明明没人用却绑不上」：`bind()` 返回 0x271D（WSAEACCES，
+       「以一种访问权限不允许的方式做了一个访问套接字的尝试」）。
+
+       原因是 Hyper-V / WSL / WinNAT 会**保留一段动态端口区间**，落在里面的端口即使空闲
+       也拒绝绑定。而且它是**时变的** —— 同一个端口昨天能跑、今天不行。
+       实测后果：`npm run ux:all` 串到第 14 支（`diag-diagnostics`）时崩在 9368，
+       **前面 13 支的结果全白跑，后面 5 支根本没轮到**。
+
+       ⇒ 绑不上就顺着往后找下一个端口，最多试 PORT_TRIES 个。
+
+       ⚠️ 这**不是**让测试变绿：断言一条没少，只是换了个能用的调试端口。
+       而且**只对「端口问题」重试** —— 其它启动失败（参数不认、Chrome 崩了）立刻抛，
+       不然真问题会被 8 次重试和一堆噪音盖住。 */
+    const PORT_TRIES = 8;
+    let proc = null;
     let chromeErr = "";
-    proc.stderr?.on("data", (b) => {
-        chromeErr = (chromeErr + b.toString()).slice(-1500);
-    });
-
-    // 等 DevTools 端口起来
     let version = null;
-    for (let i = 0; i < 120; i++) {
+    let profile = null;
+    let usedPort = port;
+
+    for (let attempt = 0; attempt < PORT_TRIES; attempt++) {
+        usedPort = port + attempt;
+        profile = fs.mkdtempSync(path.join(os.tmpdir(), "mm-cdp-"));
+        const args = [
+            `--remote-debugging-port=${usedPort}`,
+            `--user-data-dir=${profile}`,
+            `--window-size=${width},${height}`,
+            `--force-device-scale-factor=${dpr}`,
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-features=Translate,MediaRouter",
+            "--hide-scrollbars",
+        ];
+        if (headless) args.unshift("--headless=new");
+        if (gpu) args.push("--enable-gpu", "--use-angle=d3d11", "--ignore-gpu-blocklist");
+        else args.push("--disable-gpu");
+        args.push("about:blank");
+
+        // ⚠️ stderr 要接住。原来写的是 `stdio: "ignore"` —— 于是「端口未就绪」这句
+        // 什么都不说明：Chrome 是没起来？崩了？还是参数不认？全看不到。
+        // 实测踩过：连着两次「端口未就绪」，因为没有 stderr，只能靠猜。
+        proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+        chromeErr = "";
+        proc.stderr?.on("data", (b) => {
+            chromeErr = (chromeErr + b.toString()).slice(-1500);
+        });
+
+        // 等 DevTools 端口起来
+        version = null;
+        for (let i = 0; i < 120; i++) {
+            try {
+                const res = await fetch(`http://127.0.0.1:${usedPort}/json/version`);
+                version = await res.json();
+                break;
+            } catch {
+                await sleep(120);
+            }
+        }
+        if (version) break;
+
+        // 失败。先收拾干净这一轮，再判断该不该换端口重来。
         try {
-            const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-            version = await res.json();
-            break;
+            proc.kill();
         } catch {
-            await sleep(120);
+            /* ignore */
+        }
+        try {
+            fs.rmSync(profile, { recursive: true, force: true });
+        } catch {
+            /* 目录被占用就留给系统清 */
+        }
+
+        const portIssue = /bind\(\) returned an error|EACCES|access permissions|address already in use|0x271D|0x2740/i.test(
+            chromeErr,
+        );
+        if (!portIssue) {
+            throw new Error(
+                `Chrome 启动失败（端口 ${usedPort}）` +
+                    (chromeErr
+                        ? `\n--- Chrome stderr ---\n${chromeErr.trim()}`
+                        : "\n（Chrome 没有输出任何 stderr）"),
+            );
+        }
+        if (attempt < PORT_TRIES - 1) {
+            console.warn(`[cdp] 端口 ${usedPort} 绑不上（Windows 保留端口段 / 被占用），换 ${usedPort + 1} 重试…`);
         }
     }
+
     if (!version) {
-        proc.kill();
+        try {
+            proc?.kill();
+        } catch {
+            /* ignore */
+        }
         throw new Error(
-            `Chrome DevTools 端口未就绪（${port}）` +
-                (chromeErr ? `\n--- Chrome stderr ---\n${chromeErr.trim()}` : "\n（Chrome 没有输出任何 stderr）"),
+            `试了 ${PORT_TRIES} 个端口（${port}~${port + PORT_TRIES - 1}）都绑不上。` +
+                (chromeErr ? `\n--- 最后一次的 Chrome stderr ---\n${chromeErr.trim()}` : ""),
         );
     }
 
@@ -339,7 +396,7 @@ export async function launch({ port = 9333, headless = true, gpu = false, width 
     });
     const conn = new Conn(ws);
 
-    const launchInfo = { proc, conn, ws, profile, exe, version, port };
+    const launchInfo = { proc, conn, ws, profile, exe, version, port: usedPort };
 
     launchInfo.newPage = async (url) => {
         const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });

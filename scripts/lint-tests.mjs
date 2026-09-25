@@ -62,12 +62,75 @@ const problems = [];
 
 /* ------------------------------------------------- ① 语法解析 */
 
+/**
+ * 跑 `node --check`，把 stderr 收进**临时文件**（不是管道）。
+ *
+ * ## ⚠️⚠️ 为什么不能用 `encoding: "utf8"`（= 管道 stdio）
+ *
+ * 本环境实测：`spawnSync` **带管道 stdio 时恒失败**，`r.error.code === "EBUSY"` ——
+ * 连 `spawnSync("cmd.exe", ["/c","echo hi"], {encoding:"utf8"})` 都起不来。
+ * 而同一时刻 `spawn()`（异步）+ 管道正常、`spawnSync` + `stdio: "ignore"` 也正常。
+ * ⇒ 卡的是「同步 + 管道」这个组合，不是被调用的那个程序。
+ *
+ * 原实现直接 `encoding: "utf8"`，于是：
+ *   · `r.status` 是 `null`（进程压根没起来），被当成「非 0 = 语法错误」；
+ *   · `r.stderr` 是 `null`，报错文本取出来是**空字符串**；
+ *   ⇒ **82 个文件被误报成「语法错误」，报错文本全空** —— 一个看起来像
+ *     「整个仓库都坏了」的假警报，而真因是环境问题。
+ *
+ * 修法两层：
+ *   1. stderr 走**文件描述符**（不受那条限制），拿到真实的错误文本；
+ *   2. `r.error` 存在时**单独归类**为「起不来」，绝不再冒充语法错误。
+ */
+const checkSyntax = (f) => {
+    /* 固定文件名（不是 `<pid>`）—— 体检是串行的，用固定名就不会一次跑攒一个残留文件。
+       `.build/` 已被 gitignore，所以就算删不掉也不会进仓库。 */
+    const tmp = path.join(root, "tests", ".build", "_syntax-check.log");
+    let fd;
+    try {
+        fs.mkdirSync(path.dirname(tmp), { recursive: true });
+        fd = fs.openSync(tmp, "w");
+    } catch {
+        /* 开不了临时文件就退回 ignore —— 至少拿到正确的退出码 */
+        const r = spawnSync(process.execPath, ["--check", f], { stdio: "ignore" });
+        if (r.error) return { spawnFailed: r.error.code || String(r.error) };
+        return { status: r.status, stderr: "" };
+    }
+    const r = spawnSync(process.execPath, ["--check", f], { stdio: ["ignore", "ignore", fd] });
+    fs.closeSync(fd);
+    const stderr = (() => {
+        try {
+            return fs.readFileSync(tmp, "utf8");
+        } catch {
+            return "";
+        }
+    })();
+    try {
+        fs.unlinkSync(tmp);
+    } catch {
+        /* 删不掉就留给下次覆盖 */
+    }
+    if (r.error) return { spawnFailed: r.error.code || String(r.error) };
+    return { status: r.status, stderr };
+};
+
+let spawnFailures = 0;
 for (const f of files) {
     // `--check` 对 `.mjs` 按 ESM 解析，对 `.ts` 会因类型标注报错，所以只查 .mjs
     if (!f.endsWith(".mjs")) continue;
-    const r = spawnSync(process.execPath, ["--check", f], { encoding: "utf8" });
+    const r = checkSyntax(f);
+    if (r.spawnFailed) {
+        /* ⚠️ 这**不是**语法错误。混在一起报会让「环境起不了进程」看起来像
+           「代码全坏了」—— 本项目真的这么误报过 82 个文件。 */
+        spawnFailures++;
+        problems.push({ file: f, kind: "起不来", detail: `spawnSync 失败：${r.spawnFailed}（环境问题，不是语法错误）` });
+        continue;
+    }
     if (r.status !== 0) {
-        const first = (r.stderr || "").split("\n").find((l) => l.trim() && !/^\s*at /.test(l)) ?? "";
+        const first =
+            (r.stderr || "")
+                .split("\n")
+                .find((l) => l.trim() && !/^\s*at /.test(l)) ?? "";
         problems.push({ file: f, kind: "语法", detail: first.trim() });
     }
 }
@@ -163,6 +226,16 @@ if (problems.length === 0) {
 console.error(`\n[lint] ✗ ${problems.length} 处问题：`);
 for (const p of problems) {
     console.error(`  ${rel(p.file)}  [${p.kind}]  ${p.detail}`);
+}
+
+if (spawnFailures > 0) {
+    /* ⚠️ 这类问题**不是代码问题**，报出来时必须说清楚，
+       否则「82 个文件语法错误」会被当成「整个仓库坏了」去瞎改代码。 */
+    console.error(
+        `\n  ⚠️ 其中 ${spawnFailures} 处是「起不来」（spawnSync 失败），**不是语法错误** ——\n` +
+            `     那是环境问题（本环境实测：同步 spawn 带管道 stdio 会 EBUSY）。\n` +
+            `     先确认环境，再判断代码。别照着这个去改源文件。`,
+    );
 }
 
 if (problems.some((p) => p.kind === "孤儿脚本")) {

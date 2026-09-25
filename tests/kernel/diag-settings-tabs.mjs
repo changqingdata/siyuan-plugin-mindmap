@@ -19,12 +19,26 @@
  * 「有 5 个选项卡」，而是 `orphan === 0` + 「各 pane 条目数之和 == 总数」——
  * 它们合起来才能证明「没有设置项在搬运中掉在外面」。
  *
- * ## 快捷键那部分守的是「空格」
+ * ## 快捷键那部分守两件事
  *
- * 思源的键位表示法里，**空格是一个字面空格字符**（`KEYCODELIST[32] = " "`），
- * 所以 `Ctrl+空格` 的键位串是 `"⌘ "`。直接渲染出来就是看不见的 `Ctrl+ `，
- * 用户完全读不出自己该按什么。这里断言渲染结果里出现的是**可见的「空格」**，
- * 且没有尾随空白 —— 这条只有真机能验（要读 `isMac` 才能确定换算结果）。
+ * **① 全局键位要按平台换算。** 思源的键位表示法是 macOS 字形（`⇧⌘D`），
+ * 而思源自己的菜单在 Windows 上显示成 `Ctrl+Shift+D`。说明文字写死字形，
+ * Windows 用户看到的就是一套在自己「设置 → 快捷键」里找不到的符号。
+ *
+ * **② 空格仍然必须看得见。** 思源的键位表示法里**空格是一个字面空格字符**
+ * （`KEYCODELIST[32] = " "`），所以不换算就渲染成看不见的 `Ctrl+ `，
+ * 用户完全读不出该按什么。
+ *
+ * ⚠️ 默认键位换过三轮：`⌘空格` / `⌥空格`（死在 OS/IME 层）→ `⇧⌘D` / `⇧⌘S`
+ * （`⇧⌘S` 死在 Protyle 的 `stopPropagation`）→ 现在是 `⇧⌘D` / `⇧⌘B`
+ * （完整结论见 `probe-keymap-dump.mjs` 的文件头）。
+ * **但空格那条断言不能跟着删** —— 速查里仍有走 `{space}` 占位符的行
+ * （`sc.nav.fold` 折叠 / 展开、`sc.present.next` 演示推进）。
+ * 第一版把它挂在「全局那两行」上，换键位后会变成**真空断言**；
+ * 现在钉在**含「空格」二字的那些行**上，并加了一条全表兜底：
+ * 任何一行都不许以空白收尾。
+ *
+ * 这两条都只有真机能验（要读 `isMac` 才能确定换算结果）。
  *
  * 用法：node tests/kernel/diag-settings-tabs.mjs
  */
@@ -56,7 +70,12 @@ const ok = (cond, label, extra = "") => {
     }
 };
 
-const chrome = await launch({ headless: true, port: 9368, width: 1680, height: 1050, dpr: 1 });
+/* ⚠️ 端口原先写的是 9368 —— 和 `diag-diagnostics.mjs` **撞了**。
+   串跑时两者是先后关系所以没炸，但这是颗哑弹（并行跑 / 换顺序就会踩）。
+   换到 9369（本仓库未占用的号）。
+   顺带说明：`launch()` 现在遇到 Windows 保留端口段会自己往后找端口，
+   所以撞号不再致命 —— 但「一个号两处用」本身就是该修的。 */
+const chrome = await launch({ headless: true, port: 9369, width: 1680, height: 1050, dpr: 1 });
 try {
     const page = await chrome.newPage("http://127.0.0.1:6806/stage/build/desktop/");
     await page.waitFor("!!document.querySelector('.protyle-wysiwyg')", { timeout: 90000, label: "编辑器出现" });
@@ -264,7 +283,7 @@ try {
 
     /* ------------------------------------------------------------ 空格 / 平台 */
 
-    console.log("\n=== 5. ★ 键位：空格必须看得见，且与平台一致 ===");
+    console.log("\n=== 5. ★ 键位：按平台换算，空格必须看得见 ===");
     const isMac = await page.eval(
         `!!(window.siyuan && window.siyuan.config && window.siyuan.config.system && window.siyuan.config.system.os === 'darwin')`,
     );
@@ -272,19 +291,31 @@ try {
     const sideRow = sc.rows.find((r) => /并排面板打开导图/.test(r.d));
     ok(!!toggleRow && !!sideRow, "速查里有两条**全局**快捷键", JSON.stringify([toggleRow?.k, sideRow?.k]));
 
-    // ★ 核心：思源的键位串里空格是**字面空格**（`"⌘ "`），不换算就是看不见的 `Ctrl+ `。
-    ok(
-        !!toggleRow && /空格/.test(toggleRow.k) && !/\s$/.test(toggleRow.k),
-        "★ 键位里的空格被渲染成可见的「空格」，没有尾随空白（否则用户看到的是 `Ctrl+ `）",
-        JSON.stringify(toggleRow?.k),
-    );
     ok(
         isMac
-            ? /^⌘空格$/.test(toggleRow.k) && /^⌥空格$/.test(sideRow.k)
-            : toggleRow.k === "Ctrl+空格" && sideRow.k === "Alt+空格",
-        "★ 全局键位按平台换算（Windows：Ctrl+空格 / Alt+空格；macOS：⌘空格 / ⌥空格）",
+            ? toggleRow?.k === "⇧⌘D" && sideRow?.k === "⇧⌘B"
+            : toggleRow?.k === "Ctrl+Shift+D" && sideRow?.k === "Ctrl+Shift+B",
+        "★ 全局键位按平台换算（Windows：Ctrl+Shift+D / Ctrl+Shift+B；macOS：⇧⌘D / ⇧⌘B）",
         `os=${isMac ? "darwin" : "win/linux"}｜${JSON.stringify(toggleRow?.k)} / ${JSON.stringify(sideRow?.k)}`,
     );
+
+    /* ---- ★ 空格仍然必须**看得见** ----
+       默认键位曾经是 `⌘空格` / `⌥空格`（后来因为 OS/IME 拦截换掉了，见
+       `probe-keymap-dump.mjs` 的文件头）。但**速查里仍然有带空格的行** ——
+       它们是 `{space}` 占位符渲染出来的：`sc.nav.fold`（折叠 / 展开）
+       与 `sc.present.next`（演示推进）。
+
+       所以这条断言必须**钉在那些行上**，不能跟着默认键位一起删掉：
+       思源的键位串里空格是**字面空格**（`KEYCODELIST[32] = " "`），
+       不换算就渲染成看不见的 `Ctrl+ `，用户完全读不出该按什么。 */
+    const spaceRows = sc.rows.filter((r) => /空格/.test(r.k));
+    ok(spaceRows.length >= 2, "★ 速查里仍有走 `{space}` 占位符的行（折叠 / 演示推进）", spaceRows.map((r) => r.k).join(" / "));
+    const badSpace = spaceRows.filter((r) => /\s$/.test(r.k) || /[\u00a0\u2000-\u200a\u3000]$/.test(r.k));
+    ok(badSpace.length === 0, "★ 那些行的空格渲染成可见的「空格」二字，没有尾随空白（否则用户看到的是 `Ctrl+ `）", badSpace.map((r) => JSON.stringify(r.k)).join(" ") || "(无)");
+    // 全表兜底：任何一行都不该以空白收尾
+    const trailing = sc.rows.filter((r) => /\s$/.test(r.k));
+    ok(trailing.length === 0, "★ 整份速查没有任何一行以空白结尾", trailing.map((r) => JSON.stringify(r.k)).join(" ") || "(无)");
+
     // Windows 上不该出现 ⌥：它在思源「设置 → 快捷键」里根本没有对应的写法。
     // `⌘` 例外 —— `Ctrl / ⌘ + 双击` 是**故意的跨平台写法**（两种都给出）。
     const optGlyph = sc.rows.filter((r) => r.k.includes("⌥")).map((r) => r.k);

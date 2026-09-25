@@ -10,6 +10,7 @@ import type {
     MMNode,
     MMNodeMark,
     MMTheme,
+    MMTransientState,
     MMViewPrefs,
 } from "../types";
 import { MindMapView } from "./renderer";
@@ -165,6 +166,19 @@ const FOLD_MAX_TRIES = 3;
  */
 export class Scanner {
     private views = new Map<string, MindMapView>();
+
+    /**
+     * 每个列表的**瞬态**视图状态（目前是搜索）。不落盘，只为活过「视图重建」。
+     *
+     * ⚠️ 为什么必须有这份东西：导图里写一次内核（搜索命中自动展开祖先、折叠…）
+     * 就会让 Protyle 换掉整个 `.list` → `prune()` 把视图删掉 → `scan()` 建一个新的。
+     * 新视图的搜索状态是初值，用户看到的是「搜到一半搜索框自己关了」。
+     * 细节见 `types.ts` 的 `MMTransientState`。
+     *
+     * 什么时候清：**用户主动关掉导图**（`exitView`）时清 —— 下次打开该是干净的。
+     * `prune()` 那条路径（视图脱离文档）**不能清**，那正是要恢复的场景。
+     */
+    private transient = new Map<string, MMTransientState>();
 
     /**
      * i18n 取值入口。取不到就回退到内置中文 —— 缺词表时行为与以前**完全一致**。
@@ -393,6 +407,10 @@ export class Scanner {
         // 紧接着就会重挂，清掉就把用户刚折的那一下丢了。交给 reconcileFold 收尾
         // （它核对完发现列表真的没了，会自行丢弃）。
         this.signatures.delete(listId);
+        // 用户**主动**关掉导图 → 瞬态状态（搜索）也一起清，下次打开是干净状态。
+        // ⚠️ `suppress=false` 那条路径**不能清**：那是「源元素被 Protyle 重建、
+        // 紧接着就重挂」，正是要靠这份状态把搜索框与高亮恢复回来的场合。
+        if (suppress) this.transient.delete(listId);
         if (suppress) this.suppressed.set(listId, Date.now());
     }
 
@@ -617,6 +635,10 @@ export class Scanner {
                     onNodeAction: (kind, node, extra) => this.applyAction(kind, node, extra, id),
                     onBatchAction: (kind, nodes) => this.applyBatch(kind, nodes, id),
                     onViewPrefs: (next) => this.savePrefs(id, next),
+                    /* 行内视图**必须**接这条 —— 它挂在 `.list` 里，
+                       写一次内核就会被 Protyle 连根换掉、随后重建。
+                       全屏 / 并排面板挂在 `body` 上，不受影响，所以那两处没接。 */
+                    onTransient: (s) => this.transient.set(id, s),
                     onHistory: (redo) => this.undo(redo),
                     onSearchDoc: (q) => searchDocOutline(id, q),
                     onMarkChange: (node, mark) => void this.applyMark(node, mark, id),
@@ -632,6 +654,11 @@ export class Scanner {
                 view.mount();
                 list.setAttribute(MOUNT_FLAG, "1");
             });
+            /* 恢复瞬态状态（搜索框 / 查询串 / 第几条）。
+               必须在 `mount()` **之后** —— `mount()` 里才 render 出树，
+               而 `runSearch` 要在树上走一遍才找得到命中。
+               没有这一步，用户看到的就是「搜索跳到命中项的那一刻，搜索框自己关了」。 */
+            view.applyTransient(this.transient.get(id));
             this.views.set(id, view);
             this.signatures.set(id, this.signature(list));
             this.clearNotice(id);

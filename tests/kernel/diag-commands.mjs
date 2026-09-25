@@ -14,27 +14,60 @@
  *   ② 显式补发 ControlLeft 按下 / 抬起 → 唤得起
  *   ③ keyDown 带 text                  → 唤得起
  *
- * 所以本文件用 `spaceKey()` / `altShift()`（方法 ②）发键。**这不是插件的问题，是发键方式的问题** ——
+ * 所以本文件用 `combo()` / `altShift()`（方法 ②）发键。**这不是插件的问题，是发键方式的问题** ——
  * 上一版探针正因为踩了这个坑，把「快捷键没反应」误判成了插件的 bug。
  *
  * ## 覆盖
  *   A 命令面板   → 三条命令显示中文，不是裸标识符（P0-2 的真机验收）
- *   B Ctrl+空格  → 导图 / 大纲来回切，内核属性跟着写、跟着清
- *   C Alt+空格   → 并排面板开 / 关
- *   D ★ 回归     → 导图**有焦点**时按 Ctrl+空格，不能被导图自己的空格（折叠）吃掉
+ *   B ⇧⌘D       → 导图 / 大纲来回切，内核属性跟着写、跟着清
+ *   C ⇧⌘B       → 并排面板开 / 关
+ *   D ★ 回归     → 导图**有焦点**时按 ⇧⌘D，不能被导图自己的 ⌘D（快速复制）吃掉
  *   E 顶栏菜单   → 五个动作逐个点，逐个生效
  *   F 迁移命令   → 唯一**会写数据**的那条命令，真机跑一遍（含 table 反例）
- *   G ★ 通用规则 → 导图不吃**任何** ⌥⌘ 组合，不只是带修饰键的空格
+ *   G ★ 通用规则 → 导图不吃**任何** ⌥⌘ 组合，也不吃 ⇧⌘ 组合
  *   H ★ 回归     → **真实键盘式**的 Ctrl+D 也要能到插件（焦点不被思源编辑器抢走）
  *
- * ⚠️ 两条全局命令的默认键位在 1.0.x 期间从 `⌥⌘D` / `⌥⌘V` 换成了
- * `Ctrl+空格` / `Alt+空格`（思源键位串是 `"⌘ "` / `"⌥ "` —— 空格是**字面空格**，
- * 见 `index.ts` 的 `HOTKEY_TOGGLE` 注释）。发键方式也跟着多了一个 `spaceKey()`：
- * `combo()` 按字母拼 `code`，空格既不是字母也没有 `KeySpace` 这种 code。
+ * ## ⚠️⚠️ 键位换过三次，后两次都是因为「真机不触发」
+ *
+ * | 时期 | 键位 | 结果 |
+ * | --- | --- | --- |
+ * | 1.0.x 初版 | `⌥⌘D` / `⌥⌘V` | 可用 |
+ * | 1.0.x 后段 | `⌘空格` / `⌥空格` | **用户报「按了没反应」** —— 死在 OS/IME 层，见下 |
+ * | 1.1.x 前一版 | `⇧⌘D` / `⇧⌘S` | `⇧⌘S` **真机不触发** —— 死在 Protyle 层，见下 |
+ * | 现在（1.1.x） | `⇧⌘D` / `⇧⌘B` | 两道实测都过（占用 + 投递） |
+ *
+ * ### 空格那版：死在最外层 OS / 输入法（本文件**从原理上**抓不到）
+ *
+ * 冲突在 Windows / 输入法（`Ctrl+空格` = 中文输入法中英文切换、
+ * `Alt+空格` = Windows 窗口系统菜单），而 CDP 的 `Input.dispatchKeyEvent`
+ * 是**合成**事件、从渲染层注入，**绕过输入法与系统窗口过程** ——
+ * 于是这里 71 条断言全绿，真机上却一个都按不出来。
+ *
+ * **不是断言写少了，是测量手段够不着那一层。**（同族：无头浏览器复现不了 GPU 合成问题。）
+ *
+ * ### ★ `⇧⌘S` 那版：死在**思源编辑器**层（本文件**当时**也没抓到）
+ *
+ * 换到 `⇧⌘S` 之后本文件确实红了 2 条（C 段），但**红得没有解释力** ——
+ * 只知道「面板没开」，不知道卡在哪一层。后来用 `probe-hotkey-delivery.mjs`
+ * 逐层量才定位：**思源的全局快捷键匹配器挂在 `document` 冒泡阶段**，
+ * 而 `Ctrl+S` 那一族是 **Protyle 自己的处理范围**，它在路上 `stopPropagation()` ——
+ * 事件到得了捕获、到不了冒泡，匹配器根本收不到。实测对照：
+ *
+ *   | 按键 | 到 document 捕获 | 到 document 冒泡 | 结果 |
+ *   | --- | --- | --- | --- |
+ *   | `⇧⌘D` | ✓ | **✓** | 生效 |
+ *   | `⇧⌘S` | ✓ | **✗** | 毫无反应 |
+ *
+ * ⚠️ 它**只在光标位于编辑器内时失效**，焦点在别处又能用 —— 又一个「有时灵、有时不灵」。
+ * ⇒ `⇧⌘S` 弃用，改 `⇧⌘B`。
+ *
+ * **教训：断言只告诉你「坏了」，不告诉你「坏在哪一层」。**
+ * 分层定位要另做探针（`probe-keymap-dump.mjs` 查占用、`probe-hotkey-delivery.mjs` 查投递）。
  *
  * ⚠️ 换键位**没有削弱 D / G 两段的价值**：它们守的是「导图只判主键、不判修饰键」
- * 这个机理，与具体是哪个键无关 —— 导图自己的 `空格` 是折叠 / 展开，一样会被
- * `Ctrl+空格` 撞上。
+ * 这个机理，与具体是哪个键无关 ——
+ *  · D 段守的是 `⌘D`（快速复制）会不会把 `⇧⌘D` 也吃掉（`modOnly` 原先只排 Alt 不排 Shift）；
+ *  · G 段守的是 `⌥⌘` 那一族要整族让开。
  *
  * ## 第二个坑：命令面板是 ⌥⇧P，不是 ⌘P
  *
@@ -51,8 +84,8 @@
  *
  * ## 第四个坑：发修饰键组合有两种方式，用途**不能互换**
  *
- *  · `combo()` / `spaceKey()` —— 先补发裸修饰键（ControlLeft / AltLeft）的 keydown，再发主键。
- *    **能唤起思源的全局快捷键**（Ctrl+空格 / ⌥⇧P 都靠它）。
+ *  · `combo()` / `ctrlShift()` —— 先补发裸修饰键（ControlLeft / ShiftLeft）的 keydown，再发主键。
+ *    **能唤起思源的全局快捷键**（`⇧⌘D` / `⇧⌘B` / `⌥⇧P` 都靠它）。
  *  · `comboSingle()` —— 只发字母那一下并带上 `modifiers` 位，不补修饰键。
  *    事件目标留在导图里，**插件的键盘处理器收得到**；但唤不起全局快捷键。
  *
@@ -167,66 +200,21 @@ async function combo(page, key, { ctrl = false, alt = false, shift = false, gap 
 const altShift = (page, key) => combo(page, key, { alt: true, shift: true });
 
 /**
- * 带修饰键的**空格**。插件两条全局命令的默认键位都是空格（`Ctrl+空格` / `Alt+空格`）。
+ * 插件两条全局命令的默认键位：`⇧⌘D`（切换导图 / 大纲）、`⇧⌘B`（并排打开）。
  *
- * ⚠️ 不能复用 `combo()`：它按 `Key<字母>` 拼 `code`、按字母取虚拟键码，
- * 而空格既不是字母、也没有 `KeySpace` 这种 code（正确的是 `Space`，虚拟键码 32）。
- * 32 这个数就是思源键位表里的 `KEYCODELIST[32] = " "` —— 也就是说
- * `Ctrl+空格` 在思源的键位串里是 `"⌘ "`（**字面空格**，不是 `"⌘Space"`）。
+ * 走 `combo()` 就够 —— 补发 `ShiftLeft` + `ControlLeft` 再发字母，
+ * 这样思源的全局键位匹配器收得到。
  *
- * ⚠️ 本机是 Windows 时 `Ctrl+空格` 同时是**输入法切换**的默认热键，但
- * CDP 的事件直接注入渲染进程、不经过系统输入法，所以这里能测通。
- * **这不等于真机上一定能用** —— 装了中文输入法就可能被系统层截走。
- * 那个风险是已知的、写在 `index.ts` 的 `HOTKEY_TOGGLE` 注释里。
+ * ⚠️ 这里曾经有个 `spaceKey()`（因为老键位是 `Ctrl+空格` / `Alt+空格`，
+ * 而空格既不是字母、也没有 `KeySpace` 这种 code，得手写 `code: "Space"` + vk 32）。
+ * 键位换成 `⇧⌘D` / `⇧⌘B` 之后它就没人用了，**已删除**。
+ * 那版为什么必须换掉（以及「本文件从原理上抓不到 OS/IME 拦截」），见文件头的长注释。
  */
-async function spaceKey(page, { ctrl = false, alt = false } = {}) {
-    const bits = (alt ? 1 : 0) | (ctrl ? 2 : 0);
-    const held = [];
-    if (ctrl) held.push({ key: "Control", code: "ControlLeft", vk: 17 });
-    if (alt) held.push({ key: "Alt", code: "AltLeft", vk: 18 });
-    for (const m of held) {
-        await page.send("Input.dispatchKeyEvent", {
-            type: "rawKeyDown",
-            key: m.key,
-            code: m.code,
-            windowsVirtualKeyCode: m.vk,
-            nativeVirtualKeyCode: m.vk,
-            modifiers: bits,
-        });
-    }
-    await sleep(130);
-    await page.send("Input.dispatchKeyEvent", {
-        type: "rawKeyDown",
-        key: " ",
-        code: "Space",
-        windowsVirtualKeyCode: 32,
-        nativeVirtualKeyCode: 32,
-        modifiers: bits,
-    });
-    await page.send("Input.dispatchKeyEvent", {
-        type: "keyUp",
-        key: " ",
-        code: "Space",
-        windowsVirtualKeyCode: 32,
-        nativeVirtualKeyCode: 32,
-        modifiers: bits,
-    });
-    for (const m of [...held].reverse()) {
-        await page.send("Input.dispatchKeyEvent", {
-            type: "keyUp",
-            key: m.key,
-            code: m.code,
-            windowsVirtualKeyCode: m.vk,
-            nativeVirtualKeyCode: m.vk,
-            modifiers: 0,
-        });
-    }
-    await sleep(140);
-}
-/** 插件默认的「把光标所在的列表切换为导图 / 大纲」= Ctrl+空格 */
-const hotkeyToggle = (page) => spaceKey(page, { ctrl: true });
-/** 插件默认的「并排面板打开导图」= Alt+空格 */
-const hotkeySide = (page) => spaceKey(page, { alt: true });
+const ctrlShift = (page, key) => combo(page, key, { ctrl: true, shift: true });
+/** 插件默认的「把光标所在的列表切换为导图 / 大纲」= ⇧⌘D */
+const hotkeyToggle = (page) => ctrlShift(page, "d");
+/** 插件默认的「并排面板打开导图」= ⇧⌘B */
+const hotkeySide = (page) => ctrlShift(page, "b");
 
 /**
  * 单事件发键：**不补发裸修饰键的 keydown**，只在字母那一下带上 `modifiers` 位。
@@ -244,6 +232,8 @@ async function comboSingle(page, key, { ctrl = false, alt = false, shift = false
     await sleep(180);
 }
 const hotkeySingle = (page, key) => comboSingle(page, key, { ctrl: true, alt: true });
+/** ⇧⌘<key> 的单事件版 —— 与 `hotkeySingle` 同理，用来验「导图会不会误吃 ⇧⌘ 那一族」 */
+const hotkeyShiftSingle = (page, key) => comboSingle(page, key, { ctrl: true, shift: true });
 /** Ctrl+<key>，**补发裸修饰键 + 留出真人按键的间隔** —— 复现真实键盘，验「按键能不能到插件」 */
 const ctrlReal = (page, key) => combo(page, key, { ctrl: true, gap: 130 });
 
@@ -482,8 +472,8 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
         await sleep(700);
     }
 
-    /* ============================== B. Ctrl+空格 切换导图 / 大纲 ============================== */
-    console.log("\n【B Ctrl+空格 一键切换】");
+    /* ============================== B. ⇧⌘D 切换导图 / 大纲 ============================== */
+    console.log("\n【B ⇧⌘D 一键切换】");
     await clickAt(page, await page.eval(caretPoint(firstLi)));
     await sleep(500);
     await hotkeyToggle(page);
@@ -497,12 +487,38 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
     ok(!(await page.eval(`!!document.querySelector('.mm-root .mm-node')`)), "★ 再按一次切回大纲");
     ok((await page.eval(attrOf(listA))) === null, "★ 内核属性被清掉了", String(await page.eval(attrOf(listA))));
 
-    /* ============================== C. Alt+空格 并排面板 ============================== */
-    console.log("\n【C Alt+空格 并排查看】");
+    /* ============================== C. ⇧⌘B 并排面板 ============================== */
+    console.log("\n【C ⇧⌘B 并排查看】");
     await clickAt(page, await page.eval(caretPoint(firstLi)));
     await sleep(500);
+
+    /* ★★ 投递层自证：先确认「这个键能不能到 document 冒泡」。
+       思源的全局快捷键匹配器挂在**冒泡阶段**，而 `Ctrl+S` 那一族会被 Protyle
+       在中途 `stopPropagation()` —— 事件到得了捕获、到不了冒泡，命令永远收不到。
+       曾经默认键位就是 `⇧⌘S`，红出来的只是「面板没打开」，**完全看不出坏在哪一层**
+       （换成 `⇧⌘B` 之后才用 `probe-hotkey-delivery.mjs` 逐层量出来）。
+       有这条前置断言，下次再有人改键位改到被吞的字母，红的第一条会直接说明原因。 */
+    await page.eval(`(() => {
+        window.__mmDeliv = null;
+        if (window.__mmDelivHooked) return true;
+        window.__mmDelivHooked = true;
+        document.addEventListener('keydown', (e) => {
+            if (!e.ctrlKey && !e.metaKey) return;
+            const rec = { key: e.key, shift: e.shiftKey, reachedBubble: false };
+            window.__mmDeliv = rec;
+            Promise.resolve().then(() => { rec.prevented = e.defaultPrevented; });
+        }, true);
+        document.addEventListener('keydown', () => { if (window.__mmDeliv) window.__mmDeliv.reachedBubble = true; }, false);
+        return true;
+    })()`);
     await hotkeySide(page);
     await sleep(2000);
+    const deliv = await page.eval(`window.__mmDeliv`);
+    ok(
+        !!deliv && deliv.reachedBubble,
+        "★★ 前置：⇧⌘B 的事件到达了 document 冒泡 —— 思源的全局匹配器收得到（到不了就说明被 Protyle 吞了，换键位）",
+        deliv ? `key=${JSON.stringify(deliv.key)} shift=${deliv.shift} reachedBubble=${deliv.reachedBubble}` : "没收到按键",
+    );
     ok(await page.eval(`!!document.querySelector('.mm-side')`), "★ 并排面板打开了");
     ok(await page.eval(`!!document.querySelector('.mm-side .mm-node')`), "面板里真的渲染出了导图");
 
@@ -511,11 +527,12 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
     ok(!(await page.eval(`!!document.querySelector('.mm-side')`)), "★ 再按一次关掉");
 
     /* ============================== D. ★ 回归：导图有焦点时全局键不能被吃掉 ============================== */
-    console.log("\n【D ★ 回归：导图有焦点时按 Ctrl+空格】");
-    console.log("  （起因：导图自己的 `Ctrl+D` 是「复制节点」，只判 mod 的话会把带修饰键的组合一起吃掉 ——");
-    console.log("   实测后果是全局切换键失效，而且**把选中节点的子树复制一份写进了内核**）");
-    console.log("  （注意：键位已从 ⌥⌘D 换成 Ctrl+空格，但这条回归的**机理没变** ——");
-    console.log("   导图自己的 `空格` 是「折叠 / 展开」，一样只判主键，一样会把 Ctrl+空格 吃掉）");
+    console.log("\n【D ★ 回归：导图有焦点时按 ⇧⌘D】");
+    console.log("  （起因：导图自己的 `⌘D` 是「快速复制」，判据 `modOnly = mod && !e.altKey`");
+    console.log("   **只排 Alt、不排 Shift** —— 于是 `⇧⌘D` 会命中它，全局切换键失效，");
+    console.log("   而且**把选中节点的子树复制一份写进了内核**。修法是加 `modLetter = modOnly && !e.shiftKey`）");
+    console.log("  （这条回归与具体键位无关，守的是「导图不该吞掉不属于它的修饰键族」这个机理：");
+    console.log("   `⌥⌘` 靠 !e.altKey 让开、`⇧⌘` 靠 !e.shiftKey 让开）");
     await clickAt(page, await page.eval(caretPoint(firstLi)));
     await sleep(500);
     await hotkeyToggle(page);
@@ -703,61 +720,129 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
     });
     ok(!!t2, "★ 没有可迁移标记时给出明确提示，而不是点了没反应", (t2 ?? "(没等到)").slice(0, 40));
 
-    /* ============================== G. ★ 通用规则：导图不吃任何 ⌥⌘ 组合 ==============================
-     * D 段只钉住了 ⌥⌘D 这一个具体键，但真正的规则是**通用的**：
-     * `⌥⌘` 是思源与所有插件共享的命名空间，导图必须一律放行。
-     * 导图自己绑了 Ctrl+A/C/V/X/D 五个编辑动作，只要判据漏掉 altKey，
-     * 每一个都会在用户按 ⌥⌘ 时变成一次**误操作** —— 其中最狠的是 ⌥⌘X：
+    /* ============================== G. ★ 通用规则：导图不吃 ⌥⌘ / ⇧⌘ 两个共享族 ==============================
+     * D 段只钉住了 `⇧⌘D` 这一个具体键，但真正的规则是**通用的**：
+     * `⌥⌘` 与 `⇧⌘` 都是思源与所有插件共享的命名空间，导图必须整族让开。
+     *
+     * 导图自己绑了 ⌘A/C/V/X/D/F 六个编辑动作，判据漏掉哪个修饰键，
+     * 对应的那一族就会在用户按下时变成一次**误操作** —— 其中最狠的是 `⌘X`：
      * 它会照着「剪掉选中节点的子树」去改内核，等于**静默删用户笔记**。
      *
-     * 判据已用对照版（把 renderer.ts 的 `modOnly` 临时改回 `mod`）证明过**能红**：
+     * 两族的修法不同、也因此**必须分开测**：
+     *   · `⌥⌘` → `modOnly = mod && !e.altKey`
+     *   · `⇧⌘` → `modLetter = modOnly && !e.shiftKey`（本轮新加；漏了它 `⇧⌘D` 会被 `⌘D` 吃掉）
+     *
+     * 判据已用对照版证明过**能红**（把 renderer.ts 的判据临时改回 `mod`）：
      *   ⌥⌘A → `.mm-multi` 0 → 2（触发了「全选同级」）
      *   ⌥⌘C → 剪贴板写入次数 0 → 1（触发了「复制节点」）
      *   ⌥⌘X → 内核列表项数 3 → 2（**把用户的列表项剪掉了**）
      * 见 tests/kernel/probe-altmod-swallow.mjs。
+     *
+     * ⚠️ **「剪贴板被写」≠「导图写了剪贴板」**：`⇧⌘C` 是**思源内置的「复制块引用」**，
+     * 导图正确让开之后，思源照样会往剪贴板写一个块引用 ——
+     * 于是这条断言会把「让开了」判成失败（**恰好判反**）。
+     * ⇒ 这里按**调用栈**把插件写的和别人写的分开（见下面 `pluginCopies`），
+     * 并且先跑一次「导图自己的 ⌘C」做**阳性对照**，免得判据本身失效时全绿。
      */
-    console.log("\n【G ★ 通用规则：导图不吃任何 ⌥⌘ 组合】");
-    console.log("  （对照实验：modOnly 回退成 mod 时，⌥⌘A → .mm-multi 0→2、⌥⌘C → 剪贴板 0→1、⌥⌘X → 内核 3→2）");
+    console.log("\n【G ★ 通用规则：导图不吃 ⌥⌘ / ⇧⌘ 两个共享族】");
+    console.log("  （对照实验：判据回退成 mod 时，⌥⌘A → .mm-multi 0→2、⌥⌘C → 剪贴板 0→1、⌥⌘X → 内核 3→2）");
     await page.eval(`(() => {
         if (window.__mmCopyHook) return true;
         window.__mmCopyHook = true;
         window.__mmCopies = 0;
+        /* ⚠️ 只记「+1」是查不出东西的 —— 必须连**调用栈**一起记。
+           实测踩过：「⇧⌘C」这一格红了（copies 0 → 1），但光看数字分不清是
+           导图自己的「复制节点」、思源编辑器的复制、还是浏览器行为。
+           记了栈一眼就能定位（copyText ← copySubtree 就是插件，
+           栈里有 protyle 的就是思源编辑器）。
+           ⚠️ 注释里**不能写反引号** —— 这里整段是模板字符串，一个反引号就把外层截断了
+           （本轮又踩一次，症状是「missing ) after argument list」）。 */
+        window.__mmCopyStack = [];
+        const note = (api, t) => {
+            window.__mmCopies++;
+            window.__mmCopyStack.push({ api, text: String(t ?? '').slice(0, 40), stack: (new Error().stack || '').split('\\n').slice(1, 8).join(' <- ') });
+        };
         try {
             const oe = document.execCommand.bind(document);
-            document.execCommand = (c, ...r) => { if (c === 'copy') window.__mmCopies++; return oe(c, ...r); };
+            document.execCommand = (c, ...r) => { if (c === 'copy') note('execCommand', ''); return oe(c, ...r); };
         } catch (e) {}
         try {
             if (navigator.clipboard && navigator.clipboard.writeText) {
                 const ow = navigator.clipboard.writeText.bind(navigator.clipboard);
-                navigator.clipboard.writeText = (t) => { window.__mmCopies++; return ow(t); };
+                navigator.clipboard.writeText = (t) => { note('writeText', t); return ow(t); };
             }
         } catch (e) {}
         return true;
     })()`);
 
+    /* ★★ 「剪贴板被写」不等于「导图写了剪贴板」。
+       实测踩过：「⇧⌘C」这一格红了（copies 0 → 1），但**写入者根本不是插件** ——
+       调用栈里是 `stage/build/desktop/main.*.js`，内容是 `((id '甲一'))`（一个块引用）。
+       那是**思源自己的「复制块引用」**：`⇧⌘C` 是它的内置键位。
+       ⇒ 判据必须按调用栈把「插件写的」和「别人写的」分开，
+       否则这条断言会把「导图正确地让开了 ⇧⌘C」判成失败 —— 恰好判反。
+       插件是从 `/plugins/siyuan-plugin-mindmap/index.js` 加载的，帧里认得出这个路径。 */
+    const PLUGIN_COPY_FRAME = /siyuan-plugin-mindmap/;
+    const pluginCopies = (stack) => (stack || []).filter((s) => PLUGIN_COPY_FRAME.test(s.stack));
+
     const selStart = await selectNode(page, firstLi);
     ok(selStart === 1, "起点干净：导图有焦点、恰好选中 1 个节点", `选中 ${selStart ?? 0} 个`);
 
-    for (const k of ["a", "c", "x"]) {
-        /* 每个键都从干净状态起跑，不然上一个键的副作用会串味 */
-        const selBefore = await selectNode(page, firstLi);
-        const multiBefore = await page.eval(`document.querySelectorAll('.mm-root .mm-node.mm-multi').length`);
-        const itemsBefore = (await kids(listA)).length;
-        const copiesBefore = await page.eval(`window.__mmCopies`);
-        /* ★ 必须用 `hotkeySingle`（单事件）。用 `hotkeyToggle`（补发裸修饰键）的话
-           焦点会被踢出导图、插件根本收不到，三条断言会变成
-           「因为没焦点所以什么都没发生」的假绿 —— 第一版就是这么翻的车。 */
-        await hotkeySingle(page, k);
-        await sleep(1300);
-        const itemsAfter = (await kids(listA)).length;
-        const multiAfter = await page.eval(`document.querySelectorAll('.mm-root .mm-node.mm-multi').length`);
-        const copiesAfter = await page.eval(`window.__mmCopies`);
-        const K = k.toUpperCase();
-        ok(itemsAfter === itemsBefore, `★ ⌥⌘${K}：内核列表项数不变 —— 没被剪掉（⌥⌘X 会直接删用户笔记）`, `${itemsBefore} → ${itemsAfter}`);
-        ok(multiBefore === 0 && multiAfter === 0, `★ ⌥⌘${K}：没出现多选 —— 没触发导图自己的「全选同级」（Ctrl+A）`, `.mm-multi ${multiBefore} → ${multiAfter}`);
-        ok(copiesAfter === copiesBefore, `★ ⌥⌘${K}：没往剪贴板写东西 —— 没触发导图自己的「复制节点」（Ctrl+C）`, `copies ${copiesBefore} → ${copiesAfter}`);
-        /* 自证式前置：没有它，上面三条在「焦点丢了」时也会全绿 */
-        ok(selBefore >= 1, `（前置）⌥⌘${K} 之前确实选中了节点 —— 不然上面三条测的是空气`, `选中 ${selBefore} 个`);
+    /* ★ 阳性对照：先按一次**导图自己的** ⌘C（单事件 → modLetter 命中 → 插件复制节点），
+       确认「按调用栈认插件」这个判据真的认得出来。
+       没有它，下面那条「没触发导图的复制」在**判据失效**时会全绿 —— 那是假绿。 */
+    await comboSingle(page, "c", { ctrl: true });
+    await sleep(900);
+    const ctlAll = await page.eval(`window.__mmCopyStack`);
+    const ctlPlugin = pluginCopies(ctlAll);
+    ok(
+        ctlPlugin.length > 0,
+        "（前置）阳性对照：导图自己的 ⌘C 写剪贴板时，调用栈里认得出插件 —— 否则下面的「没写」是假绿",
+        `插件帧 ${ctlPlugin.length} 条 / 总计 ${ctlAll.length} 条`,
+    );
+    if (ctlPlugin.length === 0) {
+        for (const s of (ctlAll || []).slice(-2)) console.log(`      ↳ 对照写入者 [${s.api}] "${s.text}"\n        ${s.stack}`);
+    }
+    await selectNode(page, firstLi);
+
+    /* 两族一起跑。`⌥⌘` 与 `⇧⌘` 的修法不同（!e.altKey vs !e.shiftKey），
+       只测一族会漏掉另一族的回归 —— 本轮就是 `⇧⌘` 那一族漏了。 */
+    const FAMILIES = [
+        { prefix: "⌥⌘", send: hotkeySingle, family: "Alt" },
+        { prefix: "⇧⌘", send: hotkeyShiftSingle, family: "Shift" },
+    ];
+    for (const fam of FAMILIES) {
+        for (const k of ["a", "c", "x"]) {
+            /* 每个键都从干净状态起跑，不然上一个键的副作用会串味 */
+            const selBefore = await selectNode(page, firstLi);
+            const multiBefore = await page.eval(`document.querySelectorAll('.mm-root .mm-node.mm-multi').length`);
+            const itemsBefore = (await kids(listA)).length;
+            const copiesBefore = pluginCopies(await page.eval(`window.__mmCopyStack`)).length;
+            /* ★ 必须用 `hotkeySingle` / `hotkeyShiftSingle`（单事件）。
+               用补发裸修饰键的版本，焦点会被踢出导图、插件根本收不到，
+               三条断言会变成「因为没焦点所以什么都没发生」的假绿 —— 第一版就是这么翻的车。 */
+            await fam.send(page, k);
+            await sleep(1300);
+            const itemsAfter = (await kids(listA)).length;
+            const multiAfter = await page.eval(`document.querySelectorAll('.mm-root .mm-node.mm-multi').length`);
+            const copiesAfter = pluginCopies(await page.eval(`window.__mmCopyStack`)).length;
+            const K = k.toUpperCase();
+            const tag = `${fam.prefix}${K}`;
+            ok(itemsAfter === itemsBefore, `★ ${tag}：内核列表项数不变 —— 没被剪掉（${fam.prefix}X 会直接删用户笔记）`, `${itemsBefore} → ${itemsAfter}`);
+            ok(multiBefore === 0 && multiAfter === 0, `★ ${tag}：没出现多选 —— 没触发导图自己的「全选同级」（⌘A）`, `.mm-multi ${multiBefore} → ${multiAfter}`);
+            ok(
+                copiesAfter === copiesBefore,
+                `★ ${tag}：没触发导图自己的「复制节点」（${tag} 不该被当成 ⌘C）`,
+                `插件写剪贴板 ${copiesBefore} → ${copiesAfter}（思源自己写的不算）`,
+            );
+            if (copiesAfter !== copiesBefore) {
+                /* 红了就把**谁写的**打出来。没有这段，下一个人还是只能盯着「0 → 1」猜。 */
+                const st = pluginCopies(await page.eval(`window.__mmCopyStack`)).slice(-2);
+                for (const s of st) console.log(`      ↳ 插件写入者 [${s.api}] "${s.text}"\n        ${s.stack}`);
+            }
+            /* 自证式前置：没有它，上面三条在「焦点丢了」时也会全绿 */
+            ok(selBefore >= 1, `（前置）${tag} 之前确实选中了节点 —— 不然上面三条测的是空气`, `选中 ${selBefore} 个`);
+        }
     }
     ok(await page.eval(`!!document.querySelector('.mm-root .mm-node')`), "导图还开着（以上按键一个都没把它关掉）");
 

@@ -16,8 +16,10 @@
  * ## 结论（本探针已跑过，留档）
  *
  * 思源**会换算** —— Windows 上显示 `Ctrl+Z`。所以插件照搬 macOS 字形是真错。
- * 后续处理：速查改成走 `utils/hotkey.ts` 的 `readableHotkey()` 按平台换算，
- * 默认键位也从 `⌥⌘D` / `⌥⌘V` 换成了 `Ctrl+空格` / `Alt+空格`。
+ * 后续处理：速查改成走 `utils/hotkey.ts` 的 `readableHotkey()` 按平台换算。
+ * 默认键位此后改过三轮（`⌥⌘D`/`⌥⌘V` → `⌘空格`/`⌥空格` → `⇧⌘D`/`⇧⌘S` → **`⇧⌘D`/`⇧⌘B`**）：
+ * 中间那轮死在 OS/IME 层的静默拦截（结论见 `probe-keymap-dump.mjs` 的文件头），
+ * `⇧⌘S` 那轮死在 Protyle 的 `stopPropagation`（结论见 `probe-hotkey-delivery.mjs`）。
  * 本探针保留，用于以后再验证「思源的显示约定有没有变」。
  *
  * 用法：node tests/kernel/probe-keymap-display.mjs

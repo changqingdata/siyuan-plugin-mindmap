@@ -1,4 +1,5 @@
-import { fetchSyncPost } from "siyuan";
+import { fetchPost, fetchSyncPost } from "siyuan";
+import type { IWebSocketData } from "siyuan";
 import type { MMSearchHit } from "../types";
 
 /** 读取单个块的属性 */
@@ -81,11 +82,68 @@ export async function updateBlock(id: string, markdown: string): Promise<boolean
  * 而且这个状态是大纲与导图共用的同一个，不会各说各话。
  *
  * 注意内核**没有批量接口**（`batchFoldBlock` 不存在），折叠全部要逐个调。
+ *
+ * ## ⚠️⚠️ 这里必须用**异步**的 `fetchPost`，不能跟本文件其它地方一样用 `fetchSyncPost`
+ *
+ * 同步 XHR 会把**渲染进程的主线程**整个卡住 —— 实测 `/api/block/foldBlock`
+ * 在内核同时重渲染那个块时要 **~490ms** 才返回。
+ *
+ * 而折叠是**批量**的：一次「折叠全部」就是 9 次写回，加上核对重试最多 18 次。
+ * 同步发就是 **18 × 490ms ≈ 9 秒界面完全冻死**。后果不止是卡：
+ *   · 导图是渲染在 Protyle 的可编辑块里的，写回会让 Protyle 换掉整个 `.list`，
+ *     旧元素连同 `.mm-root`、**连同搜索输入框**一起脱离文档；
+ *   · 而重挂要靠一次扫描 —— 主线程被同步 XHR 占满时，**扫描根本排不上队**，
+ *     于是导图消失 8–15 秒（实测），期间敲的字全部落空。
+ *
+ * 改成异步之后这些请求并发在途，主线程一毫秒都不占。
+ * 调用方（`scanner.writeFold`）本来就是 `await` + 700ms 后再核对，
+ * 换成异步不影响任何时序保证。
+ *
+ * ## ⚠️⚠️ 但 `fetchPost` 是**回调式**的，不能直接 `await`
+ *
+ * `siyuan.d.ts` 里的签名：
+ *
+ *     export function fetchPost(
+ *         url: string, data?: any,
+ *         cb?: (response: IWebSocketData) => void,
+ *         headers?: IObject,
+ *         failCallback?: (response: IWebSocketData) => void,
+ *     ): void;
+ *
+ * 它**返回 `void`**、结果走第三个参数的回调。`await fetchPost(...)` 拿到的是
+ * `undefined`，于是 `res?.code === 0` 恒为 `false` —— 每一次折叠都被判成失败，
+ * 上层（`scheduleFoldReconcile`）就会重试，等于把同步那 9 秒的冻结原样搬了回来，
+ * 还额外刷了 9 条「折叠写回失败」的警告。踩过一次，记在这儿。
+ *
+ * 所以下面手工把它包成 Promise（`settled` 保证只结算一次：
+ * 内核既可能走 `cb` 也可能走 `failCallback`，还有可能两个都不来）。
  */
+function postAsync(url: string, data: Record<string, unknown>): Promise<IWebSocketData | undefined> {
+    return new Promise((resolve) => {
+        let settled = false;
+        const done = (res: IWebSocketData | undefined) => {
+            if (settled) return;
+            settled = true;
+            resolve(res);
+        };
+        try {
+            fetchPost(url, data, done, undefined, () => done(undefined));
+        } catch (err) {
+            console.warn("[mindmap] 异步请求发送失败", url, err);
+            done(undefined);
+        }
+    });
+}
+
 export async function setOutlineFold(id: string, folded: boolean): Promise<boolean> {
+    const url = folded ? "/api/block/foldBlock" : "/api/block/unfoldBlock";
     try {
-        const res = await fetchSyncPost(folded ? "/api/block/foldBlock" : "/api/block/unfoldBlock", { id });
-        return res?.code === 0;
+        const res = await postAsync(url, { id });
+        if (res?.code !== 0) {
+            console.warn("[mindmap] 写入大纲折叠状态被内核拒绝", id, folded, res?.code, res?.msg);
+            return false;
+        }
+        return true;
     } catch (err) {
         console.warn("[mindmap] 写入大纲折叠状态失败", id, folded, err);
         return false;

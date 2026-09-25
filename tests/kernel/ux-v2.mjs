@@ -148,8 +148,76 @@ const toolButton = (tip) => `(() => {
     return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 })()`;
 
+/**
+ * 轮询 `.mm-root` 的存在性，返回「存在 / 消失」的时间线。
+ *
+ * ★ 为什么不能只 sleep 一下再查一次：
+ * 导图里**任何会写内核**的动作（`gotoHit()` 自动展开祖先、折叠态写块属性…）
+ * 都会让 Protyle **异步**换掉整个 `.list` —— 旧元素连同 `.mm-root` 一起脱离文档，
+ * 插件随后得把它挂回来。固定的 `sleep(1200)` 撞上这个窗口时读到的就是
+ * 「导图不见了」，而它其实可能只是**回来得晚一点**。
+ * 「回来得晚」和「再也没回来」是两种完全不同的 bug（时序 vs 死锁），
+ * 只报一个 `null` 是分不出来的 —— 所以这里把时间线记下来。
+ */
+async function rootTimeline(page, ms = 8000) {
+    const t0 = Date.now();
+    const seen = [];
+    let last = null;
+    while (Date.now() - t0 < ms) {
+        const has = await page.eval(`!!document.querySelector('.mm-root:not(.mm-root--dialog)')`);
+        if (has !== last) {
+            seen.push(`${has ? "+" : "-"}${Date.now() - t0}ms`);
+            last = has;
+        }
+        if (has && seen.length >= 2) break; // 消失过、又回来了
+        if (has && seen.length === 1 && Date.now() - t0 > 1500) break; // 一直稳稳在
+        await sleep(150);
+    }
+    return { alive: last === true, timeline: seen.join(" ") || "(一直没变)" };
+}
+
+/**
+ * 等界面**真正安静**下来：折叠写回全部兑现到 DOM、导图挂着、并且这个状态持续 `quiet` 毫秒。
+ *
+ * ★ 为什么不能只等「`.mm-root` 在」：
+ * 「折叠全部」一次要写 **9 个**块属性，而 Protyle 对**每一次**写都会重渲染 ——
+ * 之后 2–3 秒里 `.list` 会被反复换掉。而 `.mm-root` 在这段时间里**是存在的**
+ * （旧的还在，新的还没换上来），所以「等它出现」这种判据会**立刻通过**，
+ * 然后在打字打到一半时被换掉 —— 输入框跟着旧 `.list` 被摘走，字全部落空。
+ * 实测：连打 15 个字符只有前 1–2 个进框，搜索自然搜不到东西。
+ *
+ * 所以判据要盯**写回有没有兑现**（`.li[fold="1"]` 的条数）＋ **状态有没有抖**，
+ * 而不是盯某一个元素在不在。
+ */
+async function waitQuiet(page, { wantFolded = 0, quiet = 1200, timeout = 25000 } = {}) {
+    const probe = `(() => ({
+        folded: document.querySelectorAll('.protyle-wysiwyg .li[fold="1"]').length,
+        mm: !!document.querySelector('.mm-root:not(.mm-root--dialog)'),
+    }))()`;
+    const t0 = Date.now();
+    let prev = null;
+    let stableSince = null;
+    let last = null;
+    while (Date.now() - t0 < timeout) {
+        last = await page.eval(probe);
+        const okNow = last.mm && last.folded >= wantFolded;
+        const key = JSON.stringify(last);
+        if (okNow && key === prev) {
+            if (stableSince === null) stableSince = Date.now();
+            else if (Date.now() - stableSince >= quiet) return { ok: true, ...last };
+        } else {
+            stableSince = null;
+        }
+        prev = key;
+        await sleep(150);
+    }
+    return { ok: false, ...(last ?? {}) };
+}
+
 try {
     const page = await chrome.newPage(`http://127.0.0.1:6806/stage/build/desktop/?id=${docId}`);
+    /* 抓页面抛错 —— 导图「消失了」时，是插件抛异常还是纯时序问题，这一条能分开 */
+    await page.eval(`window.__mmErrors = []; window.addEventListener('error', (e) => window.__mmErrors.push(String(e.message))); true`);
     await page.waitFor("!!document.querySelector('.mm-root .mm-node')", { timeout: 90000, label: "导图" });
     await sleep(1600);
 
@@ -424,26 +492,130 @@ try {
     const fold2 = await page.eval(toolButton("折叠全部"));
     if (fold2) {
         await clickAt(page, fold2);
-        await sleep(800);
+        /* ★ 必须等它真正安静下来：这一步写 9 个块属性，Protyle 会连着重渲染好几次，
+           接下来 2–3 秒里 `.list` 反复被换掉。这时打进去的字会落空 ——
+           不是搜索坏了，是输入框正跟着旧 `.list` 被摘走。 */
+        const q = await waitQuiet(page, { wantFolded: BRANCHES });
+        check("折叠全部的写回风暴平息、界面安静了", q.ok, `已折叠 ${q.folded} 项（期望 ${BRANCHES}）｜导图 ${q.mm ? "在" : "缺"}`);
     }
+    /* ★ 分步存在性断言：搜索段曾经整段报「Cannot read properties of null」，
+       但**看不出是哪一步把导图弄没的**。拆成三条，红的直接指向那一步。 */
+    const aliveAfterFold = await page.eval(`!!document.querySelector('.mm-root:not(.mm-root--dialog)')`);
+    check("折叠全部之后导图仍在", aliveAfterFold, `fold2=${!!fold2}`);
     await page.press("f", { ctrl: true });
     await sleep(400);
-    await page.type("siyuan-guide-xq");
-    await sleep(1200);
+    const aliveAfterCtrlF = await page.eval(`!!document.querySelector('.mm-root:not(.mm-root--dialog)')`);
+    const searchOpen = await page.eval(`!!document.querySelector('.mm-search input, .mm-search textarea')`);
+    check("Ctrl+F 之后导图仍在", aliveAfterCtrlF, `搜索框开没开=${searchOpen}`);
+    /* ★★ 打字要**拟人**，不能把 15 个字符一次全塞进去。
+     *
+     * 为什么：导图是在 Protyle 的**可编辑块内部**渲染的，所以插件每次大改自己的 DOM
+     * （搜索命中自动展开祖先就是一次整树 render）都会让 Protyle 重建那个 `.list` ——
+     * 旧元素连同 `.mm-root` 一起脱离文档，插件随后再挂回来。
+     * 实测那一轮重建里主线程被同步占用 **1.6 秒**（`longtask` 量到的）。
+     *
+     * `page.type("...")` 是零间隔连发，比人手和任何输入法都快，
+     * 于是 15 个字符全部落在那个 1.6 秒窗口里 —— 输入框跟着旧 `.list` 被摘走，
+     * 后面的字全落空（实测只剩 `s`）。**真人打不出这个速度，测它没有意义。**
+     * 逐字符留 70ms 间隔：比普通人打字还快，但已经跨过了重建窗口。
+     */
+    for (const ch of "siyuan-guide-xq") {
+        await page.type(ch);
+        await sleep(70);
+    }
+    /* ★ 重建可以发生（那是上面那条架构决定的），但**必须回来**。
+       用时间线而不是固定 sleep：能区分「抖了一下又回来」与「再也没回来」——
+       后者才是真故障（`views` 里陈旧视图挡住重挂那个家族）。 */
+    const tl = await rootTimeline(page);
+    check(
+        "打字触发的重建之后导图回来了",
+        tl.alive,
+        `存在性时间线 ${tl.timeline}`,
+    );
+    if (!tl.alive) {
+        const errs = await page.eval(`window.__mmErrors || []`);
+        console.log(`  插件报错：${JSON.stringify(errs.slice(-5))}`);
+    }
     const hit = await page.eval(`(() => {
+        /* ⚠️ 空安全 + 报告实际 DOM。
+           原实现直接 root.querySelector(...)，root 为 null 时抛
+           「Cannot read properties of null」，**什么线索都没有** ——
+           连「导图还在不在」「搜索框开没开」都看不出来。
+           这里把「为什么是 null」一起报出来。 */
         const root = document.querySelector('.mm-root:not(.mm-root--dialog)');
+        if (!root) {
+            return {
+                err: 'no .mm-root',
+                roots: document.querySelectorAll('.mm-root').length,
+                dialogRoots: document.querySelectorAll('.mm-root--dialog').length,
+                searchInput: !!document.querySelector('.mm-search input, .mm-search textarea'),
+                siyuanDialog: [...document.querySelectorAll('.b3-dialog--open .b3-dialog__header')].map((x) => (x.textContent || '').trim()),
+                active: (document.activeElement && (document.activeElement.className || document.activeElement.tagName)) + '',
+                protyles: document.querySelectorAll('.protyle-wysiwyg').length,
+            };
+        }
         const cur = root.querySelector('.mm-node.mm-hit-cur');
         const count = root.querySelector('.mm-search .mm-search-count, .mm-search span');
         const shown = [...root.querySelectorAll('.mm-node')].filter((el) => el.style.visibility !== 'hidden');
+        const box = root.querySelector('.mm-search');
+        const inp = box ? box.querySelector('input, textarea') : null;
         return {
             hit: cur ? cur.textContent.trim().slice(0, 30) : null,
             shownCount: shown.length,
-            searchText: root.querySelector('.mm-search') ? root.querySelector('.mm-search').textContent.trim() : '',
+            /* ⚠️ 搜索框是「input」，它的**内容不在 textContent 里** ——
+               只报 textContent 会得到「本图‹›✕」这种壳子，看不出查询串还在不在。
+               （另外：这段是模板字符串，注释里**不能写反引号**，写了就把外层截断。） */
+            searchOn: !!box && box.classList.contains('mm-search--on'),
+            query: inp ? inp.value : null,
+            hits: root.querySelectorAll('.mm-node.mm-hit').length,
+            hitsCur: root.querySelectorAll('.mm-node.mm-hit-cur').length,
+            searchText: box ? box.textContent.trim() : '',
         };
     })()`);
     console.log("搜索:", JSON.stringify(hit));
+    if (hit.err) {
+        /* ★ 定性：导图是被「清了属性」（插件主动卸载）还是「没重挂上」（时序/死锁）。
+           只看 DOM 分不出这两种，必须问内核。 */
+        const attrs = (await api("/api/attr/getBlockAttrs", { id: listId })).data ?? {};
+        console.log(
+            `  诊断：内核属性 custom-mindmap=${JSON.stringify(attrs["custom-mindmap"])}` +
+                `｜列表项数=${(await api("/api/block/getChildBlocks", { id: listId })).data?.length}`,
+        );
+        console.log("  （属性还在 = 插件没主动关，是「卸载后没重挂」；属性没了 = 被主动关掉）");
+    }
+    /* ★ 搜索状态必须**活过重建**：重建会把视图整个换掉
+       （`prune()` 删掉脱离文档的视图 → `scan()` 建一个新的），
+       不特意保住的话用户看到的是「搜到一半搜索框自己关了、查询串也没了」。
+       见 `types.ts` 的 `MMTransientState` 与 `renderer.ts` 的 `applyTransient`。 */
+    check(
+        "重建之后搜索状态还在（框开着、查询串完整）",
+        !hit.err && hit.searchOn && hit.query === "siyuan-guide-xq",
+        hit.err ? `导图不在：${hit.err}` : `searchOn=${hit.searchOn}｜query=${JSON.stringify(hit.query)}`,
+    );
     check("按链接地址搜到节点", !!hit.hit && hit.hit.includes("官方文档"), `命中「${hit.hit}」`);
     check("命中项自动展开祖先", hit.shownCount > drillBase.visible, `可见节点 ${drillBase.visible} → ${hit.shownCount}`);
+
+    /* ★★ 正文完整性：打字 / 搜索**不能**把大纲的段落换成 HTML 块。
+     *
+     * 这是最难发现的一类损坏：**文字还在**（活在
+     * `<div contenteditable="false">…</div>` 里），导图读出来一模一样，
+     * 所以上面每一条断言都照样绿 —— 而磁盘上的 `.sy` 里，
+     * 每个列表项的 `NodeParagraph` 已经变成 `NodeHTMLBlock`，大纲结构被毁。
+     *
+     * 成因：插件 UI 里的事件冒泡到 Protyle → Protyle 从 DOM 重新序列化这个块 →
+     * 序列化时看不见 `display:none` 的源大纲（`.mm-source-hidden`），
+     * 只看得见导图 → 正文被导图的渲染结果覆盖。
+     * 修法见 `renderer.ts` 的 `bindEvents()` 里那段 `stopPropagation`。
+     *
+     * 判据用「kramdown 里有没有 `contenteditable`」而不是比对文字：
+     * 文字本来就该在，只有「它待在一个 HTML 块里」才说明结构坏了。 */
+    const kram = (await api("/api/block/getBlockKramdown", { id: docId })).data?.kramdown ?? "";
+    const htmlBlocks = (kram.match(/contenteditable=/g) ?? []).length;
+    check(
+        "搜索打字没有把大纲段落变成 HTML 块",
+        htmlBlocks === 0,
+        htmlBlocks === 0 ? "正文结构干净（无 NodeHTMLBlock）" : `★ .sy 里出现 ${htmlBlocks} 处 contenteditable —— 正文被导图 DOM 覆盖了`,
+    );
     await page.screenshot(`${OUT}/v2-05-search-link.png`);
     await page.press("Escape");
     await sleep(300);
