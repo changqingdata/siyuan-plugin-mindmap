@@ -19,26 +19,28 @@ import type { SetGroupId, SetTabMeta } from "./core/settings-tabs";
  * ⚠️ 声明（`addCommand` 的 `hotkey`）与说明文字（快捷键速查）必须**共用这两个常量**。
  * 分开写迟早会漂移：改了绑定忘了改说明，用户按文档去按、按不动。
  *
- * ## ★★ 一个按键从手指到插件，要过**五道关**，任何一道都能静默吃掉它
+ * ## ★★★ 一个按键从手指到插件，要过**五道关**，任何一道都能静默吃掉它
  *
  *   ① **Windows / 输入法**（`ChsIME.exe`、微软拼音、搜狗…）
- *   ② **Chromium / Electron**（`hotKey2Electron` 注册的全局快捷键）
- *   ③ **思源编辑器 Protyle**（它自己的 `Ctrl+S/P/W/R` 一族处理）
- *   ④ **思源前端 keymap 匹配器**（`matchHotKey`，挂在 `document` **冒泡**阶段）
+ *   ② **Chromium / Electron**（浏览器自己的编辑命令：粘贴为纯文本等）
+ *   ③ **思源编辑器 Protyle**（它自己 keymap 里 `editor.*` 的处理范围）
+ *   ④ **思源前端 keymap 匹配器**（挂在 `document` **冒泡**阶段）
  *   ⑤ **插件命令执行**（本插件的 `addCommand` 回调）
  *
- * 「按了没反应」必须**逐层量**，不能猜 —— 两支现成的探针：
- *  · `npm run probe:keymapdump`   → 量 ④（键位有没有被思源别的功能占用）
- *  · `npm run probe:hotkeydelivery` → 量 ③（事件到底有没有活着走到 `document` 冒泡）
+ * 「按了没反应」必须**逐层量**，不能猜 —— 三支现成的探针：
+ *  · `npm run probe:keymapdump`   → 量④的占用（**递归**读全部作用域）
+ *  · `npm run probe:hotkeycand`   → 端到端体检候选（到冒泡 + 未被 preventDefault + 无副作用）
+ *  · `npm run probe:hotkeyrepro`  → 复现「消息提示了但画面不变」这类插件侧故障
  *
- * ## ★★ 键位改过三轮，两次都死在「看不见的层」
+ * ## ★★★ 键位改过四轮，三次都死在「看不见的层」
  *
  * | 版本 | 键位 | 死在哪一层 | 症状 |
  * |---|---|---|---|
  * | 1 | `⌥⌘D` / `⌥⌘V` | —— 可用 | 但 `⌥⌘X` 命名空间被别的插件挤，容易撞 |
  * | 2 | `⌘空格` / `⌥空格` | **① OS / IME** | 设置里显示绑上了，真机按不动 |
  * | 3 | `⇧⌘D` / `⇧⌘S` | **③ Protyle**（只 `S`） | `⇧⌘S` 设置里显示 ✓ 空闲，真机按不动 |
- * | 4 | `⇧⌘D` / `⇧⌘B` | 当前 | —— |
+ * | 4 | `⇧⌘D` / `⇧⌘B` | **③ Protyle**（只 `B`） | `⇧⌘B` 毫无反应，还在正文里插了个空段落 |
+ * | 5 | `⇧⌘D` / `⇧⌘X` | 当前 | —— |
  *
  * **第 ② 轮的死因**：`Ctrl + 空格` 是**中文输入法切换中英文**的默认热键（微软拼音 / 搜狗），
  * 输入法在系统层就把它截走了；`Alt + 空格` 是 **Windows 的窗口系统菜单**快捷键。
@@ -57,20 +59,37 @@ import type { SetGroupId, SetTabMeta } from "./core/settings-tabs";
  * ⚠️ **只在光标位于编辑器内时失效**（焦点在文档树 / 标签栏等别处时又能用）
  * —— 又一个「有时灵、有时不灵」，所以只靠手动试是试不出来的。
  *
- * ## ★★ 两道门都要过：「空闲」≠「能用」
+ * **第 ④ 轮的死因**：`⇧⌘B` 是思源 `editor.general.insertBefore`（**上方插入块**）
+ * 的**出厂默认键位**。Protyle 先把它处理掉了（实测每次按下都发一条
+ * `/api/transactions` 插一个 `NodeParagraph`），插件命令根本轮不到。
+ * 判据是「到冒泡时 `defaultPrevented` 已经是 `true`」——
+ * 所以 `⇧⌘B` 在第④道门上「看着空闲」，其实早就名花有主。
  *
- * `⇧⌘S` 在 `keymap` 里查出来是 **✓ 空闲**（没人占用，第 ④ 道门通过），
- * 却真机按不动（第 ③ 道门不通过）。
- * ⇒ **别把「设置 → 快捷键 里没冲突」当成「这个键能用」的证据。**
+ * ⚠️⚠️ **同一类坑能踩两次，是因为 `probe-keymap-dump.mjs` 自己有个 bug：
+ * 它只遍历 `keymap` 的**一层**，而 `keymap.editor` 是**两层**结构
+ * （`editor.general.insertBefore`），于是整个 `editor.*` 被静默跳过 ——
+ * `B`（insertBefore）和 `S`（strike）都被报成「✓ 空闲」。**
+ * 探针漏掉一整块数据时不会报错，只会给出过时的结论。现已改成递归遍历，
+ * 并会自证「各作用域读到了多少条」。**动那支探针的遍历逻辑时要盯住那张自证表。**
  *
- * ## 为什么是 `⇧⌘B`
+ * ## ★★ 三道门都要过：「空闲」≠「能用」
  *
- * `B` = **B**eside（并排）。`⇧⌘<A–Z>` 里除 `S` 外的安全候选
- * （`A B C E H I J K L M O V X Z`）经普查**全部**能活着走到 `document` 冒泡。
- * 挑 `B` 是兼顾「好记」与「不撞系统快捷键」。
+ * | 门 | 判据 | 反例 |
+ * |---|---|---|
+ * | 占用 | 思源 keymap 里没人绑（**含 `editor.*`**） | `⇧⌘B` = insertBefore |
+ * | 投递 | 事件到得了 `document` 冒泡 | `⇧⌘S`；`⇧⌘V`（Chromium 粘贴为纯文本） |
+ * | 独占 | 到冒泡时 `defaultPrevented` 仍是 `false` | `⇧⌘B` |
  *
- * ⚠️ **别盲扫 A–Z**：`⇧⌘W`（关标签页）/ `⇧⌘N`（新建窗口）/ `⇧⌘R`（重载）
- * 会把这一页搞没，抛 `Session with given id not found`。
+ * ## 为什么是 `⇧⌘X`
+ *
+ * `⇧⌘<A–Z>` 三道门全过的只剩 `I O Q R V W X Z` 里的几个；逐个实测
+ * （`npm run probe:hotkeycand`）后 `⇧⌘O` / `⇧⌘X` / `⇧⌘Z` 与 `⌥⇧D` / `⌥⇧O` / `⌥⇧V`
+ * 干净，`⇧⌘V` 被 Chromium 吃掉。最后选 `X`：无语义歧义
+ * （`O` 会被读成 Outline —— 正好是反的；`Z` 在很多应用里是「重做」），
+ * 也不属于 `⌥⇧` 那一族（Windows 输入法的语言切换键）。
+ *
+ * ⚠️ **别盲扫 A–Z**：`⇧⌘W`（关标签页）/ `⇧⌘R`（重载）/ `⇧⌘I`（DevTools）
+ * 会把这一页或探针自己搞没，抛 `Session with given id not found`。
  *
  * ⚠️ **键位合法性**：思源会过滤插件声明的键位（`ignoredHotkeys`），
  * 判据是含 `⌃`/`⌥`/`⌘` 前缀的**一律放行**，不含修饰键的裸单字符（如 `D`）才会被清空。
@@ -79,7 +98,7 @@ import type { SetGroupId, SetTabMeta } from "./core/settings-tabs";
  * `modLetter` 判据（字母类快捷键额外排除 Shift）。这是第 1 轮 `⌥⌘D` 就踩过的坑。
  */
 const HOTKEY_TOGGLE = "⇧⌘D";
-const HOTKEY_SIDE = "⇧⌘B";
+const HOTKEY_SIDE = "⇧⌘X";
 
 const LAYOUT_OPTIONS: Record<MMLayout, string> = {
     logic: "逻辑结构图",
@@ -590,6 +609,22 @@ export default class MindMapPlugin extends Plugin {
         await this.applyView(list, this.config.layout);
     }
 
+    /**
+     * 写入 / 清除列表块的 `custom-mindmap` 属性，并让扫描器跟上。
+     *
+     * ## ⚠️ 进入分支里那两行都不能省
+     *
+     * **`unsuppress(id)`**：退出导图时 `Scanner.unmount()` 会武装一个 3 秒的
+     * 「抑制重挂」窗口（防止 Protyle 把旧标记刷回来、导图又自己挂上去）。
+     * 但那个窗口是**按块 ID**记的，分不清「旧标记」和「用户刚写上的新标记」——
+     * 于是「退出后 3 秒内再进入」会被静默跳过：属性写上了、消息弹了「已转为导图」、
+     * **导图就是不出现**，而且进入路径只安排一次扫描，跳过之后再没有任何扫描，
+     * 画面永远不变。用户再按一次退出又会重新计时 3 秒 ⇒ 按得快就永远出不来。
+     * 实测症状就是「消息正常提示进入和退出，但实际无变化」。详见 `unsuppress()`。
+     *
+     * **`rescanSoon()`**：属性写回内核会让 Protyle 重建整个 `.list`
+     * （连同刚挂上的 `.mm-root`），只扫一次容易扫在重建之前。
+     */
     private async applyView(list: HTMLElement, layout: MMLayout | null) {
         const id = list.dataset.nodeId;
         if (!id) return;
@@ -599,9 +634,12 @@ export default class MindMapPlugin extends Plugin {
             list.removeAttribute(ATTR_VIEW);
             await setBlockAttrs(id, { [ATTR_VIEW]: null });
         } else {
+            // 用户显式要求进入 → 先解除可能还在计时的抑制窗口（见方法注释）
+            this.scanner.unsuppress(id);
             list.setAttribute(ATTR_VIEW, layout);
             await setBlockAttrs(id, { [ATTR_VIEW]: layout });
             window.setTimeout(() => this.scanner.scanAll(), 60);
+            this.scanner.rescanSoon();
         }
     }
 

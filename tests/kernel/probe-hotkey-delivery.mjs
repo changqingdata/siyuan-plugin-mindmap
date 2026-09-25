@@ -30,6 +30,12 @@
  * 第 6 节顺便扫了 14 个安全候选（`A B C E H I J K L M O V X Z`）**全部可达冒泡**，
  * 只有 `S` 这一族不行 ⇒ `⇧⌘S` 弃用，默认改成 `⇧⌘B`（`B` = Beside / 并排）。
  *
+ * ⚠️ **后来 `⇧⌘B` 也死了**，但死在**另一道关**上 —— 不是「投递」而是「独占」：
+ * 它到得了冒泡，只是冒泡时 `defaultPrevented` 已经是 `true`（思源内置
+ * `editor.general.insertBefore` 先处理了）。本探针**只查「到没到冒泡」**，
+ * 所以当时判它合格。要端到端体检得用 `probe-hotkey-candidates.mjs`。
+ * 现在默认是 `⇧⌘D` / `⇧⌘X`。
+ *
  * ⚠️ 它**只在光标位于编辑器内时失效**（焦点在文档树等别处时又能用）——
  * 又是一个「有时灵、有时不灵」，和 `⌘空格` 那轮是同一类陷阱、但不同一层。
  *
@@ -161,12 +167,20 @@ try {
         return true;
     })()`);
 
+    /* ⚠️ 坐标取**段落自己的矩形**（`div.p`），x 与 y 都是 —— 点 li 的左边缘会打到
+       `position:absolute` 的圆点、点 li 的高度中心会落到**子项那一行**（带子项的 li
+       高度含整棵子树），两者都会让思源**聚焦到某个列表项**、场景静默失效。
+       详见 `diag-commands.mjs` 的 `caretPoint` 注释。 */
     const caret = await page.eval(`(() => {
         const li = document.querySelector('.protyle-wysiwyg .li[data-node-id="${firstLi}"]');
         if (!li) return { err: 'no li' };
-        const p = li.querySelector(':scope > .protyle-wysiwyg > p, :scope > p') || li;
-        const r = p.getBoundingClientRect();
-        return { x: Math.round(r.left + 12), y: Math.round(r.top + r.height / 2) };
+        const lr = li.getBoundingClientRect();
+        const p = li.querySelector(':scope > .p, :scope > .protyle-wysiwyg > p, :scope > p');
+        if (p) {
+            const pr = p.getBoundingClientRect();
+            if (pr.width > 40) return { x: Math.round(pr.left + 12), y: Math.round(pr.top + pr.height / 2) };
+        }
+        return { x: Math.round(lr.left + 90), y: Math.round(lr.top + 20) };
     })()`);
     await page.mouse("mouseMoved", caret.x, caret.y, { buttons: 0 });
     await page.mouse("mousePressed", caret.x, caret.y, { clickCount: 1 });

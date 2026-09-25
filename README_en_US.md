@@ -57,9 +57,9 @@ Four entry points are available:
 | Block menu | list block icon → Plugin → Outline Mind Map | Converts that one list |
 | Top bar icon | the tree icon on the right of the top toolbar | Convert the current list, open side-by-side, convert every list in the document, open settings |
 | Command panel | `Alt + Shift + P`, then search "mind map" | Both commands live here, with proper labels |
-| Shortcuts | `Ctrl + Shift + D` toggles map / outline, `Ctrl + Shift + B` opens the side panel | Rebindable in SiYuan's shortcut settings |
+| Shortcuts | `Ctrl + Shift + D` toggles map / outline, `Ctrl + Shift + X` opens the side panel | Rebindable in SiYuan's shortcut settings |
 
-> On macOS these read `⇧⌘D` / `⇧⌘B` — SiYuan stores key bindings in macOS glyph form
+> On macOS these read `⇧⌘D` / `⇧⌘X` — SiYuan stores key bindings in macOS glyph form
 > internally and converts them to `Ctrl + Shift + …` on Windows itself.
 >
 > **Why not Space.** These defaults started as `Ctrl + Alt + D` / `Ctrl + Alt + V`, and were
@@ -69,16 +69,23 @@ Four entry points are available:
 > "sometimes it works" bug), and `Alt + Space` is the Windows window system menu.
 > Both are **silent** interceptions: no error, no warning, nothing happens.
 >
-> **Why the side panel is `B` and not `S`.** `S` looks like the obvious choice (Side), and we did
+> **Why the side panel is `X`, not `S` or `B`.** `S` looks like the obvious choice (Side), and we did
 > ship `Ctrl + Shift + S` for a while — but it **does not fire inside the editor**. The `Ctrl + S`
 > family belongs to SiYuan's editor (Protyle), which swallows the key on its way up the DOM tree;
 > SiYuan's global shortcut matcher sits further out and **never sees the event at all**.
 > Worse, it only fails *while the caret is inside the editor* (it works when focus is elsewhere),
-> so it looks like yet another "sometimes it works" bug. `B` (Beside) has no such problem.
+> so it looks like yet another "sometimes it works" bug.
+>
+> Then we shipped `Ctrl + Shift + B` (Beside), which failed one layer deeper: the event *did* reach
+> the outermost layer, but SiYuan's built-in "insert block above" (`editor.general.insertBefore`)
+> is bound to that exact key by default and marks the event as handled **earlier in the chain**.
+> The plugin command never got a turn — the map did nothing, while a **stray empty paragraph**
+> quietly appeared in the document. "Did the key arrive?" and "is it still unclaimed?" are two
+> different gates; checking only the first makes a taken key look free.
 >
 > The current pair contains no Space and no bare `Ctrl + Shift` (that switches input language),
-> and is verified free of collisions with every SiYuan command and installed plugin — as well as
-> verified to actually reach SiYuan's shortcut matcher.
+> and `Ctrl + Shift + X` is verified free of collisions with every SiYuan command and installed
+> plugin — as well as verified to actually reach SiYuan's shortcut matcher.
 >
 > ⚠️ SiYuan stores "space" as a **literal space character** in its key strings (not the word `Space`),
 > so the shortcut reference renders it as the visible word "Space": pasting it raw
@@ -96,7 +103,7 @@ That's not just politeness, it's **data safety**: the map itself binds `Ctrl + A
 so a predicate that forgets one modifier turns that whole family into an accidental action —
 `⌥⌘X` / `⇧⌘X` in particular would "cut the selected node's subtree", i.e. **silently delete your notes**.
 
-> The plugin's own two global hotkeys, `⇧⌘D` / `⇧⌘B`, live in that family too.
+> The plugin's own two global hotkeys, `⇧⌘D` / `⇧⌘X`, live in that family too.
 > They only take the global path while the map has *not* grabbed the keyboard, so the two never
 > fight — and with the map focused, `⇧⌘D` is not intercepted by the map's own `Ctrl + D` (duplicate).
 
@@ -157,7 +164,7 @@ Worth calling out:
 
 - **View shortcuts** opens a **grouped table dialog** — two columns ("Key | Action"), 12 groups, 37 rows —
   instead of a toast that disappears after a dozen seconds. Key names are converted per platform
-  (Windows shows `Ctrl + Shift + D` / `Ctrl + Shift + B`, macOS shows `⇧⌘D` / `⇧⌘B`), spaces render as the visible word "Space"
+  (Windows shows `Ctrl + Shift + D` / `Ctrl + Shift + X`, macOS shows `⇧⌘D` / `⇧⌘X`), spaces render as the visible word "Space"
   (otherwise you get an invisible trailing blank), and rows with no key at all
   (clicking a checkbox, using the right-click menu) say "menu action" explicitly rather than being left blank.
 - **Copy diagnostics** copies the plugin version, kernel version, a config snapshot, the state of

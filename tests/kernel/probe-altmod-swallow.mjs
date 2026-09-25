@@ -127,13 +127,21 @@ try {
     await page.waitFor("!!document.querySelector('.protyle-wysiwyg')", { timeout: 90000, label: "编辑器出现" });
     await sleep(2400);
 
-    /* 把光标放进列表项，再用插件自己的 ⌥⌘D 开导图 —— 不靠写属性，走真路径 */
+    /* 把光标放进列表项，再用插件自己的 ⌥⌘D 开导图 —— 不靠写属性，走真路径。
+       ⚠️ 坐标取**段落自己的矩形**（`div.p`），x 与 y 都是：点 li 左边缘会打到
+       `position:absolute` 的圆点，点 li 的高度中心会落到**子项那一行**
+       （带子项的 li 高度含整棵子树），两者都会让思源聚焦到某个列表项、场景静默失效。
+       详见 `diag-commands.mjs` 的 `caretPoint` 注释。 */
     const caret = await page.eval(`(() => {
         const li = document.querySelector('.protyle-wysiwyg .li[data-node-id="${firstLi}"]');
         if (!li) return { err: 'no li' };
-        const p = li.querySelector(':scope > .protyle-wysiwyg > p, :scope > p') || li;
-        const r = p.getBoundingClientRect();
-        return { x: Math.round(r.left + 12), y: Math.round(r.top + r.height / 2) };
+        const lr = li.getBoundingClientRect();
+        const p = li.querySelector(':scope > .p, :scope > .protyle-wysiwyg > p, :scope > p');
+        if (p) {
+            const pr = p.getBoundingClientRect();
+            if (pr.width > 40) return { x: Math.round(pr.left + 12), y: Math.round(pr.top + pr.height / 2) };
+        }
+        return { x: Math.round(lr.left + 90), y: Math.round(lr.top + 20) };
     })()`);
     await page.mouse("mouseMoved", caret.x, caret.y, { buttons: 0 });
     await page.mouse("mousePressed", caret.x, caret.y, { clickCount: 1 });
@@ -241,12 +249,17 @@ try {
     await page2.waitFor("!!document.querySelector('.protyle-wysiwyg')", { timeout: 90000, label: "编辑器出现" });
     await sleep(2600);
 
+    /* 同上：坐标取段落自己的矩形（点圆点或子项行都会让思源聚焦、场景静默失效） */
     const caret2 = await page2.eval(`(() => {
         const li = document.querySelector('.protyle-wysiwyg .li[data-node-id="${firstLi}"]');
         if (!li) return { err: 'no li' };
-        const p = li.querySelector(':scope > .protyle-wysiwyg > p, :scope > p') || li;
-        const r = p.getBoundingClientRect();
-        return { x: Math.round(r.left + 12), y: Math.round(r.top + r.height / 2) };
+        const lr = li.getBoundingClientRect();
+        const p = li.querySelector(':scope > .p, :scope > .protyle-wysiwyg > p, :scope > p');
+        if (p) {
+            const pr = p.getBoundingClientRect();
+            if (pr.width > 40) return { x: Math.round(pr.left + 12), y: Math.round(pr.top + pr.height / 2) };
+        }
+        return { x: Math.round(lr.left + 90), y: Math.round(lr.top + 20) };
     })()`);
     await page2.mouse("mouseMoved", caret2.x, caret2.y, { buttons: 0 });
     await page2.mouse("mousePressed", caret2.x, caret2.y, { clickCount: 1 });

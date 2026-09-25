@@ -29,9 +29,11 @@
  * （`KEYCODELIST[32] = " "`），所以不换算就渲染成看不见的 `Ctrl+ `，
  * 用户完全读不出该按什么。
  *
- * ⚠️ 默认键位换过三轮：`⌘空格` / `⌥空格`（死在 OS/IME 层）→ `⇧⌘D` / `⇧⌘S`
- * （`⇧⌘S` 死在 Protyle 的 `stopPropagation`）→ 现在是 `⇧⌘D` / `⇧⌘B`
- * （完整结论见 `probe-keymap-dump.mjs` 的文件头）。
+ * ⚠️ 默认键位换过四轮：`⌘空格` / `⌥空格`（死在 OS/IME 层）→ `⇧⌘D` / `⇧⌘S`
+ * （`⇧⌘S` 死在 Protyle 的 `stopPropagation`）→ `⇧⌘D` / `⇧⌘B`
+ * （`⇧⌘B` 是思源 `editor.general.insertBefore` 的出厂默认，**在冒泡阶段就已经
+ * 被 `preventDefault` 了** ⇒ 插件命令一次都没轮到）→ 现在是 `⇧⌘D` / `⇧⌘X`。
+ * 完整结论见 `probe-keymap-dump.mjs` 与 `probe-hotkey-candidates.mjs` 的文件头。
  * **但空格那条断言不能跟着删** —— 速查里仍有走 `{space}` 占位符的行
  * （`sc.nav.fold` 折叠 / 展开、`sc.present.next` 演示推进）。
  * 第一版把它挂在「全局那两行」上，换键位后会变成**真空断言**；
@@ -293,9 +295,9 @@ try {
 
     ok(
         isMac
-            ? toggleRow?.k === "⇧⌘D" && sideRow?.k === "⇧⌘B"
-            : toggleRow?.k === "Ctrl+Shift+D" && sideRow?.k === "Ctrl+Shift+B",
-        "★ 全局键位按平台换算（Windows：Ctrl+Shift+D / Ctrl+Shift+B；macOS：⇧⌘D / ⇧⌘B）",
+            ? toggleRow?.k === "⇧⌘D" && sideRow?.k === "⇧⌘X"
+            : toggleRow?.k === "Ctrl+Shift+D" && sideRow?.k === "Ctrl+Shift+X",
+        "★ 全局键位按平台换算（Windows：Ctrl+Shift+D / Ctrl+Shift+X；macOS：⇧⌘D / ⇧⌘X）",
         `os=${isMac ? "darwin" : "win/linux"}｜${JSON.stringify(toggleRow?.k)} / ${JSON.stringify(sideRow?.k)}`,
     );
 

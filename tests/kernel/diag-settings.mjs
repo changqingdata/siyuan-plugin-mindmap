@@ -642,8 +642,10 @@ try {
     //  ② 空格在思源的键位串里是**一个字面空格**（`KEYCODELIST[32] = " "`）。
     //     不换算就渲染成看不见的 `Ctrl+ `，用户完全读不出该按什么。
     //
-    // ⚠️ 默认键位换过三轮：`⌥⌘D` → `⌘空格`/`⌥空格`（死在 OS/IME）→ `⇧⌘D`/`⇧⌘S`
-    // （`⇧⌘S` 死在 Protyle 的 stopPropagation）→ **`⇧⌘D`/`⇧⌘B`**
+    // ⚠️ 默认键位换过四轮：`⌥⌘D` → `⌘空格`/`⌥空格`（死在 OS/IME）→ `⇧⌘D`/`⇧⌘S`
+    // （`⇧⌘S` 死在 Protyle 的 stopPropagation）→ `⇧⌘D`/`⇧⌘B`
+    // （`⇧⌘B` 是思源 `editor.general.insertBefore` 的出厂默认，冒泡时已被
+    // `preventDefault`，插件命令一次都没轮到）→ **`⇧⌘D`/`⇧⌘X`**
     // （中间那版被 Windows / 输入法层吃掉，结论见 `probe-keymap-dump.mjs` 文件头）。
     // 换键位后**第 ② 条断言不能跟着删** —— 速查里仍有走 `{space}` 占位符的行
     // （折叠 / 展开、演示推进）。所以现在把它钉在**含「空格」二字的那些行**上，
@@ -661,8 +663,8 @@ try {
     const toggleRow = scPairs.find((r) => /把光标所在的列表切换为导图/.test(r.d)) || { k: "", d: "" };
     const sideRow = scPairs.find((r) => /并排面板打开导图/.test(r.d)) || { k: "", d: "" };
     ok(
-        isMac ? toggleRow.k === "⇧⌘D" && sideRow.k === "⇧⌘B" : toggleRow.k === "Ctrl+Shift+D" && sideRow.k === "Ctrl+Shift+B",
-        "★ 全局键位按平台换算（Windows：Ctrl+Shift+D / Ctrl+Shift+B；macOS：⇧⌘D / ⇧⌘B）",
+        isMac ? toggleRow.k === "⇧⌘D" && sideRow.k === "⇧⌘X" : toggleRow.k === "Ctrl+Shift+D" && sideRow.k === "Ctrl+Shift+X",
+        "★ 全局键位按平台换算（Windows：Ctrl+Shift+D / Ctrl+Shift+X；macOS：⇧⌘D / ⇧⌘X）",
         `os=${isMac ? "darwin" : "win/linux"}｜${JSON.stringify(toggleRow.k)} / ${JSON.stringify(sideRow.k)}`,
     );
     const spaceRows = scPairs.filter((r) => /空格/.test(r.k));

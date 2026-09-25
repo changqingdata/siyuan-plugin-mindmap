@@ -17,34 +17,58 @@
  *
  * 直接读它比去 bundle 里挖默认表可靠（bundle 里那份还要自己合并 custom）。
  *
- * ## ★★ 为什么会有这个探针：默认快捷键「不触发」的完整结论
+ * ## ★★★ 这个探针自己出过一次严重事故：只遍历了一层
+ *
+ * 第一版是这么写的：
+ *
+ *     for (const [scope, val] of Object.entries(km)) {
+ *         for (const [id, v] of Object.entries(val)) { const k = eff(v); … }
+ *     }
+ *
+ * 而 `keymap` 是**两层**结构：
+ *
+ *     keymap.general       = { fileTree: {custom, default}, … }   ← 一层，能读到
+ *     keymap.editor        = { general: {insertBefore: {…}}, insert: {bold: {…}} }  ← 两层！
+ *
+ * 于是 `eff(v)` 拿到的是 `{general: {…}, insert: {…}}` 这种**分组对象**，
+ * 它既没有 `custom` 也没有 `default` ⇒ 返回 `''` ⇒ **整个 `editor.*` 被静默跳过**。
+ *
+ * 后果是灾难性的：`⇧⌘B` 明明被 `editor.general.insertBefore`（上方插入块）占着，
+ * 探针却报「✓ 空闲」；`⇧⌘S` 被 `editor.insert.strike`（删除线）占着，也报「✓ 空闲」。
+ * 两个键位就这么被选成默认值，然后在真机上**静默失灵** ——
+ * 一个是「完全没反应」，一个是「死在 Protyle 层」。
+ *
+ * **教训：探针漏掉一整块数据时不会报错，只会给出过时的结论。**
+ * 所以现在改成递归遍历，并且**自证**：把「实际读到的键位条数」和
+ * 「各作用域的原始条目数」一起打出来，条数对不上就是遍历又漏了。
+ *
+ * ## 两道关，缺一不可
+ *
+ * | 关 | 探针 | 回答 |
+ * | --- | --- | --- |
+ * | ① 占用 | **本探针** | 思源侧有没有人已经绑了这个组合 |
+ * | ② 投递 | `probe-hotkeydelivery.mjs` | 事件到不到得了 `document` 冒泡（匹配器在那儿） |
+ *
+ * ⚠️ `⇧⌘S` 在①显示 ✓ 空闲，②显示 ✗（被 Protyle 截断传播）⇒ **「空闲」≠「能用」**。
+ *
+ * ## 顺带记下的：默认快捷键「不触发」的完整结论
  *
  * 起因：默认键位从 `⌥⌘D` / `⌥⌘V` 改成 `⌘空格` / `⌥空格` 之后，用户报「按了没反应」。
  *
- * 四层逐层排查的结论（每一层都有实测证据，不是推断）：
- *
  * | 层 | 结论 | 证据 |
  * | --- | --- | --- |
- * | ① Windows / 输入法 | **两个键都被吃掉** | `ChsIME.exe`（微软拼音）在跑；`Ctrl+空格` 是它「中/英文模式切换」的默认键；`Alt+空格` 是 Windows 窗口系统菜单，由系统窗口过程消费 |
+ * | ① Windows / 输入法 | **两个键都被吃掉** | `ChsIME.exe`（微软拼音）在跑；`Ctrl+空格` 是它「中/英文模式切换」的默认键；`Alt+空格` 是 Windows 窗口系统菜单 |
  * | ② Chromium 分发 | —— | 活过①的键才到这儿 |
- * | ③ 思源 keymap | **两个键都空闲** | 本探针 dump：30 条内置 + 22 条插件键位，无一条占用 |
- * | ④ 插件命令 | **接线正常** | 前端源码 `E()` 的判据是「带 `⌃`/`⌥`/`⌘` 就放行」，两个键都被接受；`diag-commands.mjs` 合成按键能触发 |
+ * | ③ 思源 keymap | **两个键都空闲** | 本探针 dump 无一条占用 |
+ * | ④ 插件命令 | **接线正常** | 前端源码的判据是「带 `⌃`/`⌥`/`⌘` 就放行」 |
  *
- * ⇒ **冲突不在思源、也不在插件，在最外层的 OS/IME。**
- *
- * ### ⚠️ 为什么之前 71 条断言全绿却没抓到
+ * ### ⚠️ 为什么当时 71 条断言全绿却没抓到
  *
  * `diag-commands.mjs` 用 CDP 的 `Input.dispatchKeyEvent` 派发**合成**按键，
  * 它从渲染层注入，**绕过输入法与系统窗口过程**。所以这类测试
  * **在原理上就抓不到 OS/IME 层的拦截** —— 不是断言写少了，是测量手段够不着那一层。
- * （同族：无头浏览器复现不了 GPU 合成问题。）
  *
- * ### ⚠️ 还有一个「有时灵、有时不灵」的陷阱
- *
- * `Ctrl+空格` 只在**输入法处于活动状态**时被吞。纯英文输入状态 / 没装中文输入法时，
- * 它可能反而能触发。所以这类 bug 很容易被误判成「偶发」或「插件不稳」。
- *
- * ### ✅ 选默认键位时的检查清单（本项目踩过之后总结）
+ * ### ✅ 选默认键位时的检查清单
  *
  * 避开这几族（都是**静默**拦截，没有任何报错）：
  *
@@ -55,28 +79,9 @@
  * | `Shift+空格` | 微软拼音 全角/半角切换 |
  * | 单独的 `Ctrl+Shift` / `Alt+Shift` | 切换输入语言（加第三个键就不触发） |
  * | `Win+*`、`Ctrl+Alt+Del`、`Ctrl+Shift+Esc`、`Alt+Tab`、`Alt+F4` | 系统保留 |
- * | `Ctrl+Alt+字母` | 某些欧洲键盘布局上 AltGr = Ctrl+Alt，会打出字符（中文美式布局不受影响） |
+ * | `Ctrl+Alt+字母` | 某些欧洲键盘布局上 AltGr = Ctrl+Alt，会打出字符 |
  * | `⌥字母` | 思源自己用了 `⌥M`（切窗口）/ `⌥P`（设置）/ `⌥1`~`⌥9`（各停靠栏） |
- *
- * 当前默认值 **`⇧⌘D`（切换导图 / 大纲）+ `⇧⌘B`（并排打开）**：
- * 实测思源侧空闲、不在任何系统保留族里、不含 Ctrl 所以不撞 AltGr。
- * 唯一的残余风险是「松开 `Ctrl+Shift` 的瞬间可能被 IME 判成切换语言」——
- * 换绑定或改输入法的语言切换键即可。
- *
- * ### ⚠️⚠️ 但「思源侧空闲」只是**两道关里的一道**
- *
- * 这个探针只回答第③层。第①层（OS/IME）它看不到 —— 那层的结论在下面。
- * 而**第②层的「思源编辑器」也有一票否决权**，本探针同样看不到：
- *
- * 思源的全局快捷键匹配器挂在 `document` **冒泡阶段**，而 `Ctrl+S` 那一族是
- * **Protyle（编辑器）自己的处理范围**，它在路上 `stopPropagation()` ——
- * 事件到得了捕获、到不了冒泡，匹配器根本收不到。
- *
- * 实测：`⇧⌘S` 在**思源 keymap 里是空闲的**（本探针显示 ✓），但真机按下去毫无反应。
- * 所以**「本探针显示空闲」≠「这个键能用」** —— 还得过 `probe-hotkey-delivery.mjs`
- * 那道投递层检查（它扫过 14 个安全候选，`⇧⌘S` 是唯一到不了冒泡的）。
- *
- * **两道关都过，才算能用的候选。**
+ * | **思源 `editor.*` 已绑的 `⇧⌘字母`** | **`insertBefore`(B) / `strike`(S) / `insertAfter`(A) …** —— 编辑器自己会处理，命令根本轮不到 |
  *
  * 用法：node tests/kernel/probe-keymap-dump.mjs
  */
@@ -96,8 +101,7 @@ try {
     /* ⚠️ 只等 `keymap` 存在是不够的 —— 插件是**异步**加载的，
        `addCommand` 跑完之后才会往 `keymap.plugin` 里写条目。
        第一版就等漏了这一步，dump 出来的 22 条插件键位里**没有本插件自己**，
-       差一点被误读成「插件根本没注册热键」。
-       所以这里等到「插件条目数稳定」为止，并且下面会**显式报告本插件在不在**。 */
+       差一点被误读成「插件根本没注册热键」。 */
     await page.waitFor(
         `(() => { const p = window.siyuan.config.keymap.plugin || {}; return Object.keys(p).length >= 15 && !!p['siyuan-plugin-mindmap']; })()`,
         { timeout: 40000, label: "本插件的 keymap 条目已注册" },
@@ -115,13 +119,27 @@ try {
             return c || (typeof v.default === 'string' ? v.default : '');
         };
         const rows = [];
-        for (const [scope, val] of Object.entries(km)) {
-            if (scope === 'plugin') continue;
-            if (!val || typeof val !== 'object') continue;
-            for (const [id, v] of Object.entries(val)) {
-                const k = eff(v);
-                if (k) rows.push({ scope, id, key: k });
+        /* ★ 递归遍历。判据：一个对象只要带 custom / default 字段，它就是叶子。
+           不带就是**分组作用域**（keymap.editor.general 这种），要往下走。
+           只遍历一层会静默漏掉整个 editor.* —— 详见文件头的事故记录。 */
+        const walk = (scope, obj, out) => {
+            for (const [k, v] of Object.entries(obj || {})) {
+                if (!v || typeof v !== 'object') continue;
+                if ('custom' in v || 'default' in v) {
+                    const key = eff(v);
+                    if (key) out.push({ scope, id: k, key });
+                } else {
+                    walk(scope + '.' + k, v, out);
+                }
             }
+        };
+        const scopes = {};
+        for (const [name, val] of Object.entries(km)) {
+            if (name === 'plugin') continue;
+            const out = [];
+            walk(name, val, out);
+            scopes[name] = out;
+            rows.push(...out);
         }
         const plugins = [];
         for (const [name, cmds] of Object.entries(km.plugin || {})) {
@@ -130,7 +148,16 @@ try {
                 if (k) plugins.push({ plugin: name, id, key: k });
             }
         }
-        return { rows, plugins };
+        /* 自证用：各作用域的原始条目数（含空键位），与读到键位的条数对比 */
+        const rawCounts = {};
+        for (const [name, val] of Object.entries(km)) {
+            if (name === 'plugin') continue;
+            let n = 0;
+            const count = (o) => { for (const [, v] of Object.entries(o || {})) { if (v && typeof v === 'object') { if ('custom' in v || 'default' in v) n++; else count(v); } } };
+            count(val);
+            rawCounts[name] = n;
+        }
+        return { rows, plugins, scopes, rawCounts };
     })()`);
 
     if (dump.err) {
@@ -146,6 +173,13 @@ try {
         byKey.get(k).push(`${r.scope}/${r.id}`);
     }
 
+    /* ---- 自证：遍历有没有漏掉作用域 ---- */
+    console.log("\n=== 各作用域读到的键位条数（★ 自证：为 0 说明遍历又漏了一层）===");
+    for (const [scope, n] of Object.entries(dump.rawCounts)) {
+        const got = dump.scopes[scope].length;
+        console.log(`  ${scope.padEnd(12)} 原始条目 ${String(n).padStart(3)}  读到键位 ${String(got).padStart(3)}${got === 0 && n > 0 ? "   ★★ 一条都没读到 —— 遍历漏了！" : ""}`);
+    }
+
     console.log(`\n=== 思源内置命令已绑定 ${dump.rows.length} 条，去重后 ${byKey.size} 个键位 ===\n`);
     const sorted = [...byKey.entries()].sort((a, b) => a[0].localeCompare(b[0]));
     for (const [k, ids] of sorted) {
@@ -158,9 +192,7 @@ try {
         console.log(`  ${norm(p.key).padEnd(12)}  ${p.plugin} / ${p.id}`);
     }
 
-    /* ★ 自证：本插件**自己**的键位必须在里面。
-       没有这条，上面那张表看起来一切正常，但可能压根没包含被测对象 ——
-       「探针不会红，只会给出过时的结论」。 */
+    /* ★ 自证：本插件**自己**的键位必须在里面。 */
     const ours = dump.plugins.filter((p) => p.plugin === "siyuan-plugin-mindmap");
     console.log(`\n=== ★ 本插件（siyuan-plugin-mindmap）注册到的键位：${ours.length} 条 ===`);
     for (const p of ours) console.log(`  ${norm(p.key).padEnd(12)}  ${p.id}`);
@@ -170,31 +202,51 @@ try {
         process.exitCode = 1;
     }
 
-    /* 与本插件候选键位的冲突检查 —— 判据是「思源侧有没有人占」。
-       ⚠️ 这只过了一半：`⇧⌘S` 在这里显示 ✓ 空闲，但**真机按不动**
-       （被 Protyle 截断传播，见文件头）。要判「能不能用」得再跑
-       `probe-hotkey-delivery.mjs` 看投递层。 */
+    /* ---- 逐个候选查占用（内置 + 其它插件）---- */
+    const pluginByKey = new Map();
+    for (const p of dump.plugins) {
+        const k = norm(p.key);
+        if (!pluginByKey.has(k)) pluginByKey.set(k, []);
+        pluginByKey.get(k).push(`${p.plugin}/${p.id}`);
+    }
     const CANDIDATES = [
         /* 曾经的默认值：被 Windows / 输入法层吃掉（见文件头注释） */
         "⌘ ", "⌥ ",
-        /* 更早的默认值 */
+        /* 更早的默认值（当时判为可用） */
         "⌥⌘D", "⌥⌘V",
         /* 当前默认值 */
-        "⇧⌘D", "⇧⌘B",
-        /* ★ 反面样本：这里显示空闲，但投递层到不了冒泡 —— 真机不触发 */
-        "⇧⌘S",
+        "⇧⌘D", "⇧⌘X",
+        /* ★ 反面样本：显示空闲但投递层到不了冒泡 / 被编辑器抢走 */
+        "⇧⌘B", "⇧⌘S", "⇧⌘A", "⇧⌘C", "⇧⌘E", "⇧⌘H", "⇧⌘K", "⇧⌘L", "⇧⌘N",
         /* 备选 */
         "⌥⇧D", "⌥⇧B", "⌥⇧M",
         "⌥D", "⌥S", "⌥M",
         "⌘D", "⌘S", "⌥1", "⌥2",
     ];
-    console.log("\n=== 候选键位在思源侧是否已被占用 ===\n");
+    console.log("\n=== 候选键位在思源侧是否已被占用（内置 + 其它插件）===\n");
     for (const c of CANDIDATES) {
-        const hit = byKey.get(norm(c)) || [];
-        const taken = hit.length > 0;
-        console.log(`  ${norm(c).padEnd(10)}  ${taken ? "✗ 已被占用  " + hit.join(", ") : "✓ 空闲"}`);
+        const k = norm(c);
+        const hit = [...(byKey.get(k) || []), ...(pluginByKey.get(k) || [])];
+        console.log(`  ${k.padEnd(10)}  ${hit.length ? "✗ 已被占用  " + hit.join(", ") : "✓ 空闲"}`);
     }
-    console.log();
+
+    /* ---- ★ 全表普查：`⇧⌘<A–Z>` 哪些真的空闲 ----
+       这才是「选键位」真正要用的那张表。上一版因为遍历漏了 editor.*，
+       这张表会把 B / S 这类被编辑器占着的字母报成空闲。 */
+    console.log("\n=== ★ 普查：⇧⌘<A–Z> 在思源侧是否空闲 ===\n");
+    const free = [];
+    const taken = [];
+    for (let i = 0; i < 26; i++) {
+        const ch = String.fromCharCode(65 + i);
+        const k = "⇧⌘" + ch;
+        const hit = [...(byKey.get(k) || []), ...(pluginByKey.get(k) || [])];
+        if (hit.length) taken.push(`${ch}(${hit.map((h) => h.split("/").pop()).join(",")})`);
+        else free.push(ch);
+    }
+    console.log(`  ✓ 空闲 ${free.length} 个：${free.join(" ")}`);
+    console.log(`  ✗ 已占 ${taken.length} 个：${taken.join(" ")}`);
+    console.log("\n  注：这只是「占用」这道关。还要过 `probe:hotkeydelivery` 那道投递关");
+    console.log("      （事件到不到得了 document 冒泡）—— 两道都过才算能用。\n");
 } finally {
     await chrome.close();
 }

@@ -325,7 +325,8 @@ export class Scanner {
         this.views.clear();
         this.pendingFold.clear();
         this.migrated.clear();
-        this.suppressed.clear();        this.signatures.clear();
+        this.suppressed.clear();
+        this.signatures.clear();
         this.mounting.clear();
         this.visible.clear();
         this.forced.clear();
@@ -411,7 +412,45 @@ export class Scanner {
         // ⚠️ `suppress=false` 那条路径**不能清**：那是「源元素被 Protyle 重建、
         // 紧接着就重挂」，正是要靠这份状态把搜索框与高亮恢复回来的场合。
         if (suppress) this.transient.delete(listId);
-        if (suppress) this.suppressed.set(listId, Date.now());
+        /* ⚠️ 只有**真的卸掉了一个视图**才武装抑制窗口。
+         *
+         * 没有视图时（用户对着一个「属性写着导图、其实没挂上」的块再按一次退出）
+         * 武装抑制只会把紧接着的「进入」一起挡掉 —— 而进入路径只安排一次扫描，
+         * 挡掉之后就**再没有任何扫描**，画面永远不变。这正是「操作一两次就不可用」
+         * 那条死链的第 3 步，详见 `unsuppress()` 的说明。 */
+        if (suppress && view) this.suppressed.set(listId, Date.now());
+    }
+
+    /**
+     * 解除某个列表块的「抑制重挂」窗口。
+     *
+     * ## 抑制窗口是干什么的
+     *
+     * 「用户主动关掉导图」时 `unmount()` 会记一个 3 秒的时间戳。因为块属性是**异步**
+     * 写回内核的，Protyle 可能在这段时间里把 `custom-mindmap` 又刷回 DOM 上；
+     * 不抑制的话紧接着的那次扫描会看到标记还在、又把导图挂回去 —— 用户会觉得「关不掉」。
+     *
+     * ## 为什么必须能解除（★ 这条死链是本插件最隐蔽的一个 bug）
+     *
+     * 抑制是**按块 ID**记的，它分不清「这次扫描看到的是 Protyle 刷回来的旧标记」
+     * 还是「用户刚按了进入、亲手写上的新标记」。于是：
+     *
+     * | 步 | 发生的事 |
+     * | --- | --- |
+     * | 1 | 用户按 `⇧⌘D` 退出 → `suppressed[id] = now`（窗口 3 秒） |
+     * | 2 | 用户 3 秒内再按 `⇧⌘D` 进入 → 属性写上了、消息也弹了「已转为导图」 |
+     * | 3 | 进入路径只安排一次 `scanAll`（+60ms，加观察器一次 +160ms）—— **两次都在窗口内，全被跳过** |
+     * | 4 | 此后再没有任何东西触发扫描 ⇒ 导图**永远不出现**，画面与消息相反 |
+     *
+     * 而且第 4 步之后用户再按一次「退出」，`unmount()` 会**重新计时 3 秒** ——
+     * 只要按得比 3 秒快，就永远出不来。实测就是这个：退出后 2.3 秒再进入，
+     * 属性变 `logic`、`data-mm-mounted` 不存在、`.mm-root` 不存在，而且一直不恢复。
+     *
+     * 所以：**用户显式要求进入时先把窗口清掉**（`index.ts` 的 `applyView` 进入分支调用）。
+     * 用户显式要求退出时**不**清 —— 那正是窗口该生效的场合。
+     */
+    unsuppress(listId: string) {
+        this.suppressed.delete(listId);
     }
 
     /* ================================================================ 扫描 */
@@ -731,8 +770,12 @@ export class Scanner {
      * 所以按 120/420/900/1800ms 连扫几次，把 Protyle 的异步窗口整个盖住。
      * 多次扫描是幂等的：`prune()` 只删脱离文档的视图，第 1 步只挂没挂过的元素，
      * `render()` 只在签名真的变了时才跑（第一次扫完签名就对齐了，后面几次是空转）。
+     *
+     * ⚠️ 同一个道理也适用于**「进入导图模式」**：`index.ts` 的 `applyView` 在写上
+     * `custom-mindmap` 之后也要连扫几次 —— 那次属性写回同样会让 Protyle 重建
+     * 整个 `.list`，只扫一次容易扫在重建之前。所以这个方法是 `public`。
      */
-    private rescanSoon() {
+    rescanSoon() {
         for (const delay of [120, 420, 900, 1800]) {
             window.setTimeout(() => this.scanAll(), delay);
         }

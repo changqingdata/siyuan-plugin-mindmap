@@ -20,21 +20,23 @@
  * ## 覆盖
  *   A 命令面板   → 三条命令显示中文，不是裸标识符（P0-2 的真机验收）
  *   B ⇧⌘D       → 导图 / 大纲来回切，内核属性跟着写、跟着清
- *   C ⇧⌘B       → 并排面板开 / 关
+ *   B2 ★ 回归    → **退出后 1 秒内再进入**必须挂上（抑制重挂窗口不得挡住显式进入）
+ *   C ⇧⌘X       → 并排面板开 / 关（含「到冒泡 + 未被 preventDefault」两道前置门）
  *   D ★ 回归     → 导图**有焦点**时按 ⇧⌘D，不能被导图自己的 ⌘D（快速复制）吃掉
  *   E 顶栏菜单   → 五个动作逐个点，逐个生效
  *   F 迁移命令   → 唯一**会写数据**的那条命令，真机跑一遍（含 table 反例）
  *   G ★ 通用规则 → 导图不吃**任何** ⌥⌘ 组合，也不吃 ⇧⌘ 组合
  *   H ★ 回归     → **真实键盘式**的 Ctrl+D 也要能到插件（焦点不被思源编辑器抢走）
  *
- * ## ⚠️⚠️ 键位换过三次，后两次都是因为「真机不触发」
+ * ## ⚠️⚠️ 键位换过四次，后三次都是因为「真机不触发」
  *
  * | 时期 | 键位 | 结果 |
  * | --- | --- | --- |
  * | 1.0.x 初版 | `⌥⌘D` / `⌥⌘V` | 可用 |
  * | 1.0.x 后段 | `⌘空格` / `⌥空格` | **用户报「按了没反应」** —— 死在 OS/IME 层，见下 |
  * | 1.1.x 前一版 | `⇧⌘D` / `⇧⌘S` | `⇧⌘S` **真机不触发** —— 死在 Protyle 层，见下 |
- * | 现在（1.1.x） | `⇧⌘D` / `⇧⌘B` | 两道实测都过（占用 + 投递） |
+ * | 1.1.x 上一版 | `⇧⌘D` / `⇧⌘B` | `⇧⌘B` **毫无反应** —— 被思源内置 `insertBefore` 抢走，见下 |
+ * | 现在（1.1.x） | `⇧⌘D` / `⇧⌘X` | 三道实测都过（占用 + 投递 + 独占） |
  *
  * ### 空格那版：死在最外层 OS / 输入法（本文件**从原理上**抓不到）
  *
@@ -61,8 +63,23 @@
  * ⚠️ 它**只在光标位于编辑器内时失效**，焦点在别处又能用 —— 又一个「有时灵、有时不灵」。
  * ⇒ `⇧⌘S` 弃用，改 `⇧⌘B`。
  *
+ * ### ★★ `⇧⌘B` 那版：死在**「别人已经处理过」**（本文件当时只查了「到没到冒泡」）
+ *
+ * `⇧⌘B` 是思源 `editor.general.insertBefore`（**上方插入块**）的**出厂默认键位**。
+ * 事件照样到得了 `document` 冒泡，所以 C 段那条「到冒泡」的前置断言**是绿的** ——
+ * 但 Protyle 已经在编辑器里把它处理掉了：实测每按一次就发一条 `/api/transactions`
+ * 往正文里插一个空段落，而插件的命令**一次都没跑**。
+ *
+ * ⇒ **「到得了冒泡」只是必要条件。** 现在 C 段多了第三条断言：
+ * 到冒泡时 `defaultPrevented` 必须仍是 `false`（没人抢着处理）。
+ *
+ * ⚠️⚠️ 而这一版之所以会被选中，是因为 `probe-keymap-dump.mjs` 自己漏读了一整块数据
+ * （只遍历 `keymap` 一层，而 `keymap.editor` 是两层结构）——
+ * `B` 和 `S` 都被报成「✓ 空闲」。**探针漏数据时不会报错，只会给出过时的结论。**
+ *
  * **教训：断言只告诉你「坏了」，不告诉你「坏在哪一层」。**
- * 分层定位要另做探针（`probe-keymap-dump.mjs` 查占用、`probe-hotkey-delivery.mjs` 查投递）。
+ * 分层定位要另做探针（`probe-keymap-dump.mjs` 查占用、`probe-hotkey-candidates.mjs`
+ * 端到端体检候选、`probe-hotkey-delivery.mjs` 查投递）。
  *
  * ⚠️ 换键位**没有削弱 D / G 两段的价值**：它们守的是「导图只判主键、不判修饰键」
  * 这个机理，与具体是哪个键无关 ——
@@ -85,7 +102,7 @@
  * ## 第四个坑：发修饰键组合有两种方式，用途**不能互换**
  *
  *  · `combo()` / `ctrlShift()` —— 先补发裸修饰键（ControlLeft / ShiftLeft）的 keydown，再发主键。
- *    **能唤起思源的全局快捷键**（`⇧⌘D` / `⇧⌘B` / `⌥⇧P` 都靠它）。
+ *    **能唤起思源的全局快捷键**（`⇧⌘D` / `⇧⌘X` / `⌥⇧P` 都靠它）。
  *  · `comboSingle()` —— 只发字母那一下并带上 `modifiers` 位，不补修饰键。
  *    事件目标留在导图里，**插件的键盘处理器收得到**；但唤不起全局快捷键。
  *
@@ -200,21 +217,21 @@ async function combo(page, key, { ctrl = false, alt = false, shift = false, gap 
 const altShift = (page, key) => combo(page, key, { alt: true, shift: true });
 
 /**
- * 插件两条全局命令的默认键位：`⇧⌘D`（切换导图 / 大纲）、`⇧⌘B`（并排打开）。
+ * 插件两条全局命令的默认键位：`⇧⌘D`（切换导图 / 大纲）、`⇧⌘X`（并排打开）。
  *
  * 走 `combo()` 就够 —— 补发 `ShiftLeft` + `ControlLeft` 再发字母，
  * 这样思源的全局键位匹配器收得到。
  *
  * ⚠️ 这里曾经有个 `spaceKey()`（因为老键位是 `Ctrl+空格` / `Alt+空格`，
  * 而空格既不是字母、也没有 `KeySpace` 这种 code，得手写 `code: "Space"` + vk 32）。
- * 键位换成 `⇧⌘D` / `⇧⌘B` 之后它就没人用了，**已删除**。
+ * 键位换成 `⇧⌘D` / `⇧⌘X` 之后它就没人用了，**已删除**。
  * 那版为什么必须换掉（以及「本文件从原理上抓不到 OS/IME 拦截」），见文件头的长注释。
  */
 const ctrlShift = (page, key) => combo(page, key, { ctrl: true, shift: true });
 /** 插件默认的「把光标所在的列表切换为导图 / 大纲」= ⇧⌘D */
 const hotkeyToggle = (page) => ctrlShift(page, "d");
-/** 插件默认的「并排面板打开导图」= ⇧⌘B */
-const hotkeySide = (page) => ctrlShift(page, "b");
+/** 插件默认的「并排面板打开导图」= ⇧⌘X */
+const hotkeySide = (page) => ctrlShift(page, "x");
 
 /**
  * 单事件发键：**不补发裸修饰键的 keydown**，只在字母那一下带上 `modifiers` 位。
@@ -245,14 +262,43 @@ async function clickAt(page, pt) {
     return pt;
 }
 
-/** 真实点进列表项的文字，把光标放进列表 */
+/**
+ * 真实点进列表项的文字，把光标放进列表。
+ *
+ * ## ⚠️ 坐标必须取**段落自己的矩形**（`.p`），x 和 y 都是
+ *
+ * 踩过两次，都是「页面被切走」而不是「断言变红」：
+ *
+ * 1. **x**：思源 3.8 的段落容器是 `<div class="p">`，文档里**一个 `<p>` 标签都没有**
+ *    （实测 `document.querySelectorAll('.protyle-wysiwyg p').length === 0`），
+ *    所以旧选择器必然落空、回退到 `<li>`，而 `li.left + 12` 落在列表项**左侧的圆点**上
+ *    —— `.protyle-action` 是 `position: absolute`、宽 34px，整块压在 li 的左边缘上。
+ * 2. **y**：`li.top + li.height / 2` 也不行 —— 一个**带子项的**列表项，高度包含
+ *    整棵子树（实测 139px vs 段落 44px），「中心」落在**子项那一行**上，
+ *    而子项是缩进的、它的圆点正好挪到 x≈608 附近。于是「点第一个列表项」
+ *    变成了「点它子项的圆点」。
+ *
+ * 实测（`tests/.build/_diag-caret.mjs`）：`(li.left+12, li 高度中心)` 有时点出
+ * 「聚焦该列表项」——`.protyle-wysiwyg` 的 `data-doc-type` 从 `NodeDocument` 变成
+ * `NodeListItem`、`.list` 数量归零、`targetList()` 找不到列表；而同一坐标换个滚动位置
+ * 又「碰巧」落在子项文字上、安然无恙。**成败取决于滚动位置**，所以它是间歇性的：
+ * `probe-hotkey-repro.mjs` 的 G 段与 `diag-commands.mjs` 的 B 段都这么空转过。
+ *
+ * 取 `.p` 的矩形则无歧义 —— 段落就是这一项自己的那一行（实测光标祖先链
+ * `p <- li <- list <- protyle-wysiwyg`，落在**外层**列表里）。
+ * 取不到 `.p` 时退到 `li.left + 90` / `li.top + 20`（避开左边缘与子项行）。
+ */
 const caretPoint = (liId) => `(() => {
     const li = document.querySelector('.protyle-wysiwyg .li[data-node-id="${liId}"]');
     if (!li) return { err: 'no li' };
-    const p = li.querySelector(':scope > .protyle-wysiwyg > p, :scope > p') || li;
-    const r = p.getBoundingClientRect();
-    if (r.width < 1) return { err: 'li 不可见' };
-    return { x: Math.round(r.left + 12), y: Math.round(r.top + r.height / 2) };
+    const lr = li.getBoundingClientRect();
+    if (lr.width < 1) return { err: 'li 不可见' };
+    const p = li.querySelector(':scope > .p, :scope > .protyle-wysiwyg > p, :scope > p');
+    if (p) {
+        const pr = p.getBoundingClientRect();
+        if (pr.width > 40) return { x: Math.round(pr.left + 12), y: Math.round(pr.top + pr.height / 2) };
+    }
+    return { x: Math.round(lr.left + 90), y: Math.round(lr.top + 20) };
 })()`;
 
 /** 某个列表块上挂的导图数量（`custom-mindmap` 属性） */
@@ -487,8 +533,41 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
     ok(!(await page.eval(`!!document.querySelector('.mm-root .mm-node')`)), "★ 再按一次切回大纲");
     ok((await page.eval(attrOf(listA))) === null, "★ 内核属性被清掉了", String(await page.eval(attrOf(listA))));
 
-    /* ============================== C. ⇧⌘B 并排面板 ============================== */
-    console.log("\n【C ⇧⌘B 并排查看】");
+    /* ============================== B2. ★ 回归：退出后 1 秒内再进入 ==============================
+       用户报的原话：「可以正常通过快捷键进入和退出，但是操作一两次就不可用了
+       （消息正常提示进入和退出导图模式，但是实际无变化）」。
+
+       根因：`Scanner.unmount()` 在退出时武装一个 **3 秒**的「抑制重挂」窗口
+       （防止 Protyle 把旧标记刷回 DOM、导图又自己挂上去），而**进入路径只安排一次扫描**
+       （`scanAll` @ +60ms，加观察器一次 @ +160ms）—— 两次都落在窗口内 ⇒ 全被跳过 ⇒
+       属性写上了、消息弹了「已转为导图」、**导图就是不出现**，而且此后再没有任何扫描。
+       更糟的是再按一次「退出」会重新计时 3 秒 ⇒ 只要按得比 3 秒快，就永远出不来。
+
+       ⚠️ 这条断言**必须贴着窗口按**（< 1.5 秒），并且在窗口过期**之前**检查。
+       否则窗口一过期，随便哪次 DOM 变动带来的扫描都能把它救回来 ——
+       断言会「绿」，而用户照样在窗口内看到「消息提示了但画面不变」。 */
+    console.log("\n【B2 ★ 回归：退出后 1 秒内再进入（抑制窗口不得挡住显式进入）】");
+    await clickAt(page, await page.eval(caretPoint(firstLi)));
+    await sleep(400);
+    await hotkeyToggle(page);
+    await sleep(1800);
+    ok(await page.eval(`!!document.querySelector('.mm-root .mm-node')`), "先进入导图（建立基线）");
+    await hotkeyToggle(page);
+    await sleep(1000);
+    ok(!(await page.eval(`!!document.querySelector('.mm-root .mm-node')`)), "退出已生效（此刻开始计 3 秒抑制窗口）");
+    await hotkeyToggle(page);
+    await sleep(1200);
+    ok(
+        await page.eval(`!!document.querySelector('.mm-root .mm-node')`),
+        "★★ 抑制窗口内再进入，导图必须出现（检查点约在退出后 2.2 秒，仍在窗口内）",
+        `root=${await page.eval(`!!document.querySelector('.mm-root')`)} 属性=${await page.eval(attrOf(listA))}`,
+    );
+    await hotkeyToggle(page);
+    await sleep(1600);
+    ok(!(await page.eval(`!!document.querySelector('.mm-root .mm-node')`)), "收尾：切回大纲");
+
+    /* ============================== C. ⇧⌘X 并排面板 ============================== */
+    console.log("\n【C ⇧⌘X 并排查看】");
     await clickAt(page, await page.eval(caretPoint(firstLi)));
     await sleep(500);
 
@@ -496,7 +575,8 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
        思源的全局快捷键匹配器挂在**冒泡阶段**，而 `Ctrl+S` 那一族会被 Protyle
        在中途 `stopPropagation()` —— 事件到得了捕获、到不了冒泡，命令永远收不到。
        曾经默认键位就是 `⇧⌘S`，红出来的只是「面板没打开」，**完全看不出坏在哪一层**
-       （换成 `⇧⌘B` 之后才用 `probe-hotkey-delivery.mjs` 逐层量出来）。
+       （换成 `⇧⌘B` 之后才用 `probe-hotkey-delivery.mjs` 逐层量出来；
+       而 `⇧⌘B` 自己又栽在「别人已经处理过」上，见文件头）。
        有这条前置断言，下次再有人改键位改到被吞的字母，红的第一条会直接说明原因。 */
     await page.eval(`(() => {
         window.__mmDeliv = null;
@@ -516,8 +596,18 @@ const chrome = await launch({ headless: true, port: 9380, width: 1680, height: 1
     const deliv = await page.eval(`window.__mmDeliv`);
     ok(
         !!deliv && deliv.reachedBubble,
-        "★★ 前置：⇧⌘B 的事件到达了 document 冒泡 —— 思源的全局匹配器收得到（到不了就说明被 Protyle 吞了，换键位）",
+        "★★ 前置①：⇧⌘X 的事件到达了 document 冒泡 —— 思源的全局匹配器收得到（到不了就是被 Protyle 吞了，换键位）",
         deliv ? `key=${JSON.stringify(deliv.key)} shift=${deliv.shift} reachedBubble=${deliv.reachedBubble}` : "没收到按键",
+    );
+    /* ★★ 前置②：到冒泡时不能被别人 preventDefault。
+       这一条是 `⇧⌘B` 那版的直接教训 —— 它是思源 `editor.general.insertBefore`
+       （上方插入块）的默认键位，事件**到得了**冒泡，所以只查前置①时**是绿的**；
+       可 Protyle 已经在编辑器里把它处理掉了（每按一次往正文插一个空段落），
+       插件命令一次都没跑。两条一起查，才能把「这个键真的属于我们」钉住。 */
+    ok(
+        !!deliv && deliv.prevented === false,
+        "★★ 前置②：到冒泡时 defaultPrevented 仍是 false —— 没有别的命令抢先处理它",
+        deliv ? `defaultPrevented=${deliv.prevented}` : "没收到按键",
     );
     ok(await page.eval(`!!document.querySelector('.mm-side')`), "★ 并排面板打开了");
     ok(await page.eval(`!!document.querySelector('.mm-side .mm-node')`), "面板里真的渲染出了导图");
