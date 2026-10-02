@@ -1,7 +1,7 @@
-import type { MMDropPosition, MMNode } from "../types";
+import type { MMBlockShell, MMDropPosition, MMNode } from "../types";
 import type { InsertBlockOptions } from "../utils/api";
-import { deleteBlock, insertBlock, moveBlock, setTaskMarker, setTaskMarkers, updateBlock } from "../utils/api";
-import { escapeMd, indexInParent, isAncestor, newItemMarkdown, serializeSubtree } from "./tree";
+import { deleteBlock, insertBlock, moveBlock, setTaskMarker, setTaskMarkers, updateBlock, updateBlockDom } from "../utils/api";
+import { escapeMd, hasInlineTag, indexInParent, isAncestor, newItemMarkdown, serializeSubtree } from "./tree";
 
 /**
  * 节点结构操作 —— 全部落到思源内核块 API。
@@ -44,12 +44,35 @@ async function relocateByCopy(node: MMNode, place: Omit<InsertBlockOptions, "dat
 
 /* ==================================================================== 操作 */
 
-/** 改名。内容未变化或为空时不做任何写入 */
-export async function renameNode(node: MMNode, text: string): Promise<boolean> {
+/**
+ * 把节点文字写回内核。
+ *
+ * ## 两条通道，按内容分流
+ *
+ * - **纯文本**（清洗后没有标签）→ 走 markdown + `escapeMd`。
+ *   这是**必须保留**的：用户输入 `1. 测试` `*重点*` 时，语义是「这几个字符」，
+ *   不是「有序列表 / 斜体」。走 DOM 通道会把它们解析成格式。
+ * - **含标签**（加粗 / 双链 / 公式 / 图片 / 颜色……）→ 走 DOM 通道。
+ *   markdown 通道在这里会丢东西（实测图片的 src 直接丢），而且会二次解析用户输入。
+ *
+ * ## 以前为什么不能这么写
+ *
+ * 原先只有 markdown 一条通道，而就地编辑提交时**只拿得到 `textContent`** ——
+ * 于是含格式的节点一旦就地改名，格式就被静默重建成纯文本。为了堵住这个数据破坏，
+ * 上层加了「含格式的节点不就地编辑、弹回源列表」的分流，代价是**导图整个退出**。
+ * 现在编辑面维护 `innerHTML` 并且有了 DOM 通道，那条分流就不需要了。
+ *
+ * @param html 清洗过的行内 HTML（`prepareInlineForWrite` 的产物）
+ * @param text 同一份内容的纯文本，走 markdown 通道时用
+ * @param shell 源块外壳（见 `MMBlockShell`）—— DOM 通道靠它保住块类型与标题级别
+ */
+export async function renameNode(node: MMNode, html: string, text: string, shell: MMBlockShell | null = null): Promise<boolean> {
     if (!node.contentId) return false;
-    const next = text.replace(/\s+/g, " ").trim();
-    if (!next || next === node.text) return false;
-    return updateBlock(node.contentId, escapeMd(next));
+    const nextText = text.replace(/\s+/g, " ").trim();
+    const nextHtml = html.trim();
+    if (!nextText && !hasInlineTag(nextHtml)) return false;
+    if (!hasInlineTag(nextHtml)) return updateBlock(node.contentId, escapeMd(nextText));
+    return updateBlockDom(node.contentId, nextHtml, shell);
 }
 
 /**

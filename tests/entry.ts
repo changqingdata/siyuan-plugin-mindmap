@@ -22,6 +22,7 @@ import {
     canOutdent,
     escapeMd,
     hasInlineFormat,
+    hasInlineTag,
     indexInParent,
     isAncestor,
     markerOf,
@@ -29,6 +30,7 @@ import {
     serializeSubtree,
     topLevelOf,
 } from "../src/core/tree";
+import { isBlankText, stripZeroWidth } from "../src/utils/caret";
 import type { MMNode } from "../src/types";
 
 const g = globalThis as any;
@@ -453,11 +455,44 @@ const mk = (o: Partial<MMNode>) => o as unknown as MMNode;
     eq(out[0], '- <span data-type="strong">父</span>', "父节点保格式");
     eq(out[1], '  - <span data-type="em">子</span>', "子节点保格式且缩进");
 
-    // 改名走哪条路由这个判据决定：
-    // 含格式 → 回到源列表改（就地改会把格式抹掉）；纯文本 → 就地改（轻快且无损）
-    eq(hasInlineFormat(rich[0]), true, "含格式的节点必须回到原文编辑");
-    eq(hasInlineFormat(rich[2]), true, "纯图片节点也必须回到原文编辑");
-    eq(hasInlineFormat(rich[1]), false, "纯文本节点可以就地改名");
+    // 改名走哪条**写回通道**，由这个判据决定：
+    //   纯文本 → markdown 通道（保住用户输入的 `*` `1.` 是字面量，不被当语法）
+    //   含标签 → DOM 通道（markdown 通道会丢图片 src、也会二次解析用户输入）
+    //
+    // ⚠️ 它**不再**是「含格式的节点不就地编辑、弹回源列表」那条分流 ——
+    //    那条分流已经取消（编辑面现在维护完整 innerHTML，含格式的节点也能就地改，
+    //    实测双击一个含双链的节点会导致整个导图退出，代价太重）。
+    eq(hasInlineFormat(rich[0]), true, "含格式的节点走 DOM 通道写回");
+    eq(hasInlineFormat(rich[2]), true, "纯图片节点也走 DOM 通道");
+    eq(hasInlineFormat(rich[1]), false, "纯文本节点走 markdown 通道");
+}
+
+// 5.4b 「这段 HTML 里有没有标签」——写回通道分流的唯一判据
+{
+    eq(hasInlineTag("纯文本"), false, "纯文本没有标签");
+    eq(hasInlineTag("**看起来像加粗**"), false, "markdown 记号不算标签（它是字面量）");
+    eq(hasInlineTag(""), false, "空串没有标签");
+    eq(hasInlineTag('<span data-type="strong">粗</span>'), true, "span 算标签");
+    eq(hasInlineTag('<img src="assets/x.png">'), true, "裸 img 算标签");
+    eq(hasInlineTag("换行<br>而已"), false, "br 不算标签（它不携带格式）");
+}
+
+// 5.4c 零宽字符的处理（光标垫片 / 触发串识别共用同一份定义）
+//
+// 背景：编辑框末尾是行内元素时，光标要落在「自己补的零宽空格之后」才能让字打在元素外面
+// （Blink 会把「元素之后的边界」归一化进元素内部，实测见 utils/caret.ts 的文件头）。
+// 于是「剥零宽」成了取词与判空的前置步骤，这里把它的语义钉死。
+{
+    eq(stripZeroWidth("甲一\u200B"), "甲一", "剥掉零宽空格");
+    eq(stripZeroWidth("\u200B"), "", "只剩垫片时剥成空串");
+    eq(stripZeroWidth("a\u200Db\u2060c\uFEFFd"), "abcd", "U+200D / U+2060 / U+FEFF 一并剥掉");
+    eq(stripZeroWidth("普通文本"), "普通文本", "没有零宽字符时原样返回");
+    // ⚠️ 零宽空格**不是** ECMAScript 的 WhiteSpace，所以 trim() 对它无效 ——
+    // 这正是判空必须走 stripZeroWidth 而不能只 trim 的原因
+    eq("\u200B".trim(), "\u200B", "trim() 去不掉零宽空格（这条是上面那条存在的原因）");
+    eq(isBlankText("\u200B"), true, "只有垫片算空");
+    eq(isBlankText("\u200B  \u200B"), true, "垫片 + 空白也算空");
+    eq(isBlankText("补"), false, "有真字符就不算空");
 }
 
 // 5.5 markdown 转义（改名是纯文本语义，不能被解析成结构）

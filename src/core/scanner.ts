@@ -6,6 +6,7 @@ import type {
     MMActionResult,
     MMBatchKind,
     MMConfig,
+    MMEditResult,
     MMLayout,
     MMNode,
     MMNodeMark,
@@ -670,7 +671,7 @@ export class Scanner {
                     onExit: () => this.exitView(id),
                     onLayoutChange: (layout) => this.hooks.onLayoutChange(id, layout),
                     onFullscreen: (root, theme) => this.hooks.onFullscreen(id, root, theme, title),
-                    onRename: (node, text) => void this.applyRename(node, text, id),
+                    onRename: (node, edit) => void this.applyRename(node, edit, id),
                     onNodeAction: (kind, node, extra) => this.applyAction(kind, node, extra, id),
                     onBatchAction: (kind, nodes) => this.applyBatch(kind, nodes, id),
                     onViewPrefs: (next) => this.savePrefs(id, next),
@@ -801,14 +802,20 @@ export class Scanner {
         this.history.push({ listId, label, before, after, attrs });
     }
 
-    /** 改名回写（全屏视图也会调用） */
-    async applyRename(node: MMNode, text: string, listId = "") {
-        const changed = text.replace(/\s+/g, " ").trim() !== node.text;
+    /**
+     * 就地编辑回写（全屏 / 并排视图也会调用）。
+     *
+     * 判「有没有改」用的是 **HTML** 而不是纯文本 —— 用户可能只加了个粗体、
+     * 只把一段文字变成双链，纯文本一模一样。用 `text` 比较会把这类修改整个丢掉，
+     * 而界面上因为还原了 `savedHtml`，当场看不出来（「改了没反应」最难查的一种）。
+     */
+    async applyRename(node: MMNode, edit: MMEditResult, listId = "") {
+        const changed = edit.html !== (node.html ?? "").trim();
         if (!changed) return;
         this.lastUserActionAt = Date.now();
 
         const before = await this.snapshot(listId);
-        const ok = await renameNode(node, text);
+        const ok = await renameNode(node, edit.html, edit.text, edit.shell);
         if (!ok) {
             showMessage(this.t("msg.renameFailed", "改名失败"), 4000, "error");
             return;

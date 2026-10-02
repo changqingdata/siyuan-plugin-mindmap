@@ -114,6 +114,37 @@ function readArrayOfIdName(file, name) {
     return out;
 }
 
+/**
+ * 取 `const NAME = [{ label|key: "键", fallback: "中文" }]` —— 候选表。
+ *
+ * 与 `readArrayOfIdName` 形状相近，但字段名不同：斜杠菜单用 `label`、
+ * 行内标记工具条用 `key`，中文兜底都叫 `fallback`。两个名字都认。
+ * ⚠️ 表里还有 `glyph` / `hint` / `type` 这些字符串字段，所以**必须按字段名挑**，
+ * 不能按「第一个字符串属性」猜。
+ */
+function readArrayOfLabeledFallback(file, name) {
+    const sf = ts.createSourceFile(file, fs.readFileSync(path.join(ROOT, file), "utf8"), ts.ScriptTarget.Latest, true);
+    const out = {};
+    sf.forEachChild(function find(node) {
+        if (ts.isVariableDeclaration(node) && node.name.getText(sf) === name && ts.isArrayLiteralExpression(node.initializer)) {
+            for (const el of node.initializer.elements) {
+                if (!ts.isObjectLiteralExpression(el)) continue;
+                let key = null;
+                let fb = null;
+                for (const p of el.properties) {
+                    if (!ts.isPropertyAssignment(p) || !ts.isStringLiteral(p.initializer)) continue;
+                    const k = p.name.getText(sf);
+                    if ((k === "label" || k === "key") && p.initializer.text) key = p.initializer.text;
+                    if (k === "fallback" && p.initializer.text) fb = p.initializer.text;
+                }
+                if (key && fb) out[key] = fb;
+            }
+        }
+        ts.forEachChild(node, find);
+    });
+    return out;
+}
+
 /** 取 `const NAME = [["键", "中文"], …]` —— 空键（`["", ""]` 占位行）跳过 */
 function readKeyedPairs(file, name) {
     const sf = ts.createSourceFile(file, fs.readFileSync(path.join(ROOT, file), "utf8"), ts.ScriptTarget.Latest, true);
@@ -139,6 +170,21 @@ for (const [file, name, prefix, form] of DYNAMIC_SOURCES) {
 }
 for (const [file, name] of KEYED_PAIRS) {
     for (const [k, v] of Object.entries(readKeyedPairs(file, name))) dynamicKeys.set(k, v);
+}
+/**
+ * 键名写在**数组元素**里的候选表 —— 与 `DYNAMIC_SOURCES` 的区别是**不打前缀**，
+ * 因为键本身就是完整的（`slash.image` / `mark.strong`）。
+ *
+ * ⚠️ 漏登记这里的后果特别隐蔽：消费点写的是 `this.o.t(item.label, item.fallback)`，
+ * 第一个参数不是字符串字面量，静态扫描看不见 ⇒ `--write` 会把这几条**洗掉**，
+ * 中文界面照旧（fallback 兜着），只有英文用户会看到中文。
+ */
+const DYNAMIC_KEYED_ARRAYS = [
+    ["src/core/inline-assistant.ts", "SLASH_ITEMS"],
+    ["src/core/inline-assistant.ts", "MARKS"],
+];
+for (const [file, name] of DYNAMIC_KEYED_ARRAYS) {
+    for (const [k, v] of Object.entries(readArrayOfLabeledFallback(file, name))) dynamicKeys.set(k, v);
 }
 // `tip.filter.<值>` 由 FILTER_LABEL 推导（只给 todo / done 两档，`all` 走 tip.filterAll）
 for (const k of ["todo", "done"]) {

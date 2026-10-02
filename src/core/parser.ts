@@ -1,4 +1,5 @@
-import type { MMNode, MMNodeKind } from "../types";
+import type { MMBlockShell, MMNode, MMNodeKind } from "../types";
+import { ZERO_WIDTH } from "../utils/caret";
 import { ATTR_MARK, decodeMark } from "./marks";
 
 /**
@@ -12,17 +13,14 @@ import { ATTR_MARK, decodeMark } from "./marks";
  *           └── div.list                    （嵌套的子列表）
  */
 /**
- * 零宽字符。
- *
- * Protyle 会往块内容里塞 U+200B（零宽空格）。它**不在** ECMAScript 的
- * WhiteSpace 集合里，所以 `trim()` 去不掉 —— 实测每个节点的 textContent
- * 末尾都挂着一个，肉眼和普通字符串比较都看不出来。
- *
- * 留着它的代价：node.text 会带着它进 serializeSubtree，于是「复制节点」
- * 和「降级副本路径」会把不可见字符写回内核；搜索匹配、导出文本、
- * 重命名时的等值比较也都会被它干扰。所以在解析这一层就清掉。
+ * 零宽字符（`ZERO_WIDTH`）的**定义在 `utils/caret.ts`** —— 编辑层的触发串识别、
+ * 选区判空也要用同一份，所以不再在这里各写一个正则。
+ * 为什么必须清掉：Protyle 会往块内容里塞 U+200B，它**不在** ECMAScript 的
+ * WhiteSpace 集合里，`trim()` 去不掉 —— 实测每个节点的 textContent 末尾都挂着一个，
+ * 肉眼和普通字符串比较都看不出来。留着它，`node.text` 会带着它进 `serializeSubtree`，
+ * 于是「复制节点」和「降级副本路径」会把不可见字符写回内核；搜索匹配、导出文本、
+ * 重命名时的等值比较也都会被它干扰。
  */
-const ZERO_WIDTH = /[\u200B-\u200D\u2060\uFEFF]/g;
 
 /**
  * 「这段 HTML 里有标签吗」。
@@ -151,6 +149,41 @@ function findContentEl(li: HTMLElement): HTMLElement | null {
     return null;
 }
 
+/**
+ * 列表项内容块的**写回外壳**（见 `MMBlockShell`）。
+ *
+ * ⚠️ 这里的判据只能是「从源块上抄」，不能靠枚举 `data-type` 猜 ——
+ * 猜错过一次，代价是**改一个标题节点就把标题降级成段落**：
+ *
+ *   段落  `<div data-type="NodeParagraph" class="p"><div contenteditable="true">…</div><div class="protyle-attr">…</div></div>`
+ *   标题  `<div data-subtype="h1" data-type="NodeHeading" class="h1"><div contenteditable="true">…</div><div class="protyle-attr">…</div></div>`
+ *
+ * 两者**形状完全一致**，差别只在 `data-type` / `class` / `data-subtype`。
+ * 曾经以为「标题是元素自己可编辑、段落是可编辑容器在里层」，实测（思源 3.8.6）
+ * 是错的 —— 标题的里层同样有一个 `contenteditable` 的 div。
+ * 所以「抄开标签」既是最省事的写法，也是唯一不会随块类型增加而失效的写法。
+ */
+export function shellOf(li: HTMLElement): MMBlockShell | null {
+    const el = findContentEl(li);
+    if (!el) return null;
+    const tag = el.tagName.toLowerCase();
+    const attrs: string[] = [];
+    for (const a of Array.from(el.attributes)) {
+        // `updated` 归内核管；`data-node-index` 是 Protyle 的渲染顺序提示，都不该抄回去
+        if (VOLATILE_ATTRS.has(a.name)) continue;
+        attrs.push(`${a.name}="${a.value.replace(/"/g, "&quot;")}"`);
+    }
+    return {
+        open: `<${tag}${attrs.length ? " " + attrs.join(" ") : ""}>`,
+        tag,
+        // 有里层可编辑容器 → 写回时要补回里层与 protyle-attr（段落 / 标题都是这种）
+        wrap: !!el.querySelector('[contenteditable="true"]'),
+    };
+}
+
+/** 抄开标签时要剔掉的属性 */
+const VOLATILE_ATTRS = new Set(["updated", "data-node-index"]);
+
 /** 取 .li 下直接子级的嵌套列表 */
 function findSubListEl(li: HTMLElement): HTMLElement | null {
     for (const el of Array.from(li.children)) {
@@ -190,7 +223,7 @@ const DROP_SELECTOR = '[class*="protyle-"], .img__net';
  * 天然就是副本，所以安全；但任何「拿到 contentEl 元素直接改」的写法都是在动
  * 思源自己的编辑器 DOM —— 用户没编辑却改了笔记，绝对不能那么干。
  */
-function sanitizeInline(html: string): string {
+export function sanitizeInline(html: string): string {
     const basic = sanitizeByRegex(html);
     if (!basic) return "";
     if (typeof document === "undefined" || typeof document.createElement !== "function") return basic;
@@ -198,6 +231,47 @@ function sanitizeInline(html: string): string {
         return sanitizeByDom(basic) || basic;
     } catch {
         return basic;
+    }
+}
+
+/**
+ * 写回内核前的最后一道收窄。
+ *
+ * 与 `sanitizeInline` 的区别：`sanitizeInline` 面向**渲染**（把编辑器 DOM 变成能塞进
+ * `.mm-txt` 的行内 HTML），这里面向**落库**（把用户改过的行内 HTML 变成内核能吃的 DOM）。
+ * 落库多两条要求：
+ *
+ *  1. **行内公式只留 `data-content`。** Protyle 把 `$E=mc^2$` 渲染成一整棵 KaTeX DOM
+ *     （`.katex` / `.katex-html` / 几十个 span）。那棵树是**渲染产物**，内核按
+ *     `data-content` 自己会重渲染 —— 原样写回去等于把一大坨一次性 DOM 冻进 `.sy`。
+ *  2. **不留 `data-mm-*` 之类的插件私有属性**（万一以后有人往编辑框里塞）。
+ */
+export function prepareInlineForWrite(html: string): string {
+    const clean = sanitizeInline(html);
+    if (!clean) return "";
+    if (typeof document === "undefined" || typeof document.createElement !== "function") return clean;
+    try {
+        const tpl = document.createElement("template");
+        tpl.innerHTML = clean;
+        const frag = tpl.content as unknown as HTMLElement | null;
+        if (!frag) return clean;
+
+        // 行内公式：留 span 与它的属性（含 data-content），清掉 KaTeX 渲染产物
+        frag.querySelectorAll('[data-type="inline-math"]').forEach((el) => {
+            while (el.firstChild) el.removeChild(el.firstChild);
+        });
+        // 插件私有属性一律不落库
+        frag.querySelectorAll("*").forEach((el) => {
+            for (const attr of Array.from(el.attributes)) {
+                if (attr.name.startsWith("data-mm-")) el.removeAttribute(attr.name);
+            }
+        });
+
+        const box = document.createElement("div");
+        box.appendChild(frag);
+        return box.innerHTML.trim();
+    } catch {
+        return clean;
     }
 }
 

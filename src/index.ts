@@ -745,7 +745,7 @@ export default class MindMapPlugin extends Plugin {
                 // 布局改到哪儿去了？走 onViewPrefs 存进文档级视图偏好。
                 onLayoutChange: () => undefined,
                 onFullscreen: () => undefined,
-                onRename: (node, text) => void this.scanner.applyRename(node, text, id),
+                onRename: (node, edit) => void this.scanner.applyRename(node, edit, id),
                 onNodeAction: (kind, node, extra) => this.scanner.applyAction(kind, node, extra, id),
                 onBatchAction: (kind, nodes) => this.scanner.applyBatch(kind, nodes, id),
                 onViewPrefs: (prefs) => this.scanner.savePrefs(id, prefs),
@@ -839,7 +839,7 @@ export default class MindMapPlugin extends Plugin {
                 onExit: () => dialog.destroy(),
                 onLayoutChange: (layout) => this.persistLayout(listId, layout),
                 onFullscreen: () => undefined,
-                onRename: (node, text) => void this.scanner.applyRename(node, text, listId),
+                onRename: (node, edit) => void this.scanner.applyRename(node, edit, listId),
                 onNodeAction: (kind, node, extra) => this.scanner.applyAction(kind, node, extra, listId),
                 onBatchAction: (kind, nodes) => this.scanner.applyBatch(kind, nodes, listId),
                 onViewPrefs: (prefs) => this.scanner.savePrefs(listId, prefs),

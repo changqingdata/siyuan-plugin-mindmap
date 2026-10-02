@@ -5,9 +5,11 @@ import type {
     MMActionKind,
     MMActionResult,
     MMBatchKind,
+    MMBlockShell,
     MMConfig,
     MMDropPosition,
     MMEdgeStyle,
+    MMEditResult,
     MMFilter,
     MMLayout,
     MMNode,
@@ -20,7 +22,7 @@ import type {
 } from "../types";
 import { EDIT_FLAG, FILTER_LABEL } from "../types";
 import { applyTheme, hexA, mixHex, readRgb, resolveTheme, THEME_LIST } from "./theme";
-import { decorate, flatten, indexById, parseList, wrapRoot } from "./parser";
+import { decorate, flatten, indexById, parseList, prepareInlineForWrite, shellOf, wrapRoot } from "./parser";
 import { layout } from "./layout";
 import { buildConnectors } from "./edge";
 import type { Connector } from "./edge";
@@ -33,14 +35,16 @@ import {
     canMoveDown,
     canMoveUp,
     canOutdent,
-    hasInlineFormat,
+    hasInlineTag,
     isAncestor,
     NEW_NODE_TEXT,
     serializeSubtree,
     shownChildren,
 } from "./tree";
 import { copyText, scrollToBlock } from "../utils/api";
+import { caretToEnd } from "../utils/caret";
 import { hasMark, MARK_COLORS, MARK_ICONS, MARK_LABEL_MAX, sameMark } from "./marks";
+import { InlineAssistant } from "./inline-assistant";
 
 export interface ViewCallbacks {
     /**
@@ -63,7 +67,10 @@ export interface ViewCallbacks {
     onLocate: (id: string) => void;
     /**
      * 回到源列表里编辑这个节点。
-     * 含行内格式的节点只能这么改 —— 就地编辑写回的是纯文本，会把格式抹掉。
+     *
+     * ⚠️ 这**不再是**「含格式节点」的必经之路 —— 就地编辑现在维护 `innerHTML`
+     * 并且有 DOM 写回通道，含格式的节点也能直接改（见 beginEdit 的注释）。
+     * 它保留下来是给「我就是想去大纲里改」这种主动选择用的。
      */
     onEditInSource: (node: MMNode) => void;
     /** 退出导图视图 */
@@ -72,8 +79,8 @@ export interface ViewCallbacks {
     onLayoutChange: (layout: MMLayout) => void;
     /** 请求全屏查看 */
     onFullscreen: (root: MMNode, theme: MMTheme) => void;
-    /** 改名回写内核 */
-    onRename: (node: MMNode, text: string) => void;
+    /** 就地编辑回写内核 */
+    onRename: (node: MMNode, edit: MMEditResult) => void;
     /**
      * 结构操作：增删 / 升降级 / 上下移 / 拖拽 / 复制。
      *
@@ -431,6 +438,14 @@ export class MindMapView {
 
     /** 正在编辑的节点（编辑期间跳过重渲染，避免打断输入） */
     private editing: MMNode | null = null;
+    /**
+     * 编辑态的行内输入辅助（斜杠菜单 / 块引用搜索 / 选中工具条）。
+     *
+     * 与 `editing` 同生命周期：进编辑态时建、退出时销毁。
+     * 它的浮层住在 `.mm-root` 里，所以失焦守卫要问它「焦点是不是在我这儿」
+     * （见 beginEdit 的 onBlur）。
+     */
+    private assistant: InlineAssistant | null = null;
 
     /** 编辑期间被挡下的渲染请求，退出编辑时补做一次 */
     private pendingRender = false;
@@ -3783,15 +3798,34 @@ export class MindMapView {
      * @param force 跳过上面的分流，强制就地编辑。只给「插入即编辑」用 ——
      *   刚建出来的节点只有占位文字，没有任何格式会被写坏，而回源编辑会退出导图。
      */
+    /**
+     * 进入编辑态。
+     *
+     * ## 现在只有一条路：就地编辑，且**不再分流**
+     *
+     * 以前的写法是「纯文本节点就地改、含格式的节点回到源列表改」，原因是
+     * 提交时只拿得到 `textContent` —— 一旦节点里有双链 / 图片 / 加粗，
+     * 就地改名会把它们**静默重建成纯文本**。那条分流的代价很重：
+     * 用户双击一个含双链的节点，**整个导图会退出**（实测 `mmRootStillThere: false`）。
+     *
+     * 现在编辑面维护 `innerHTML`，提交时过一遍 `prepareInlineForWrite` 再走
+     * DOM 通道写回（实测能无损往返块引用 / 链接 / 加粗 / 图片），
+     * 所以分流可以彻底取消 —— 含格式的节点也能就地改文字，格式不动。
+     *
+     * ## 输入辅助
+     *
+     * 编辑态里挂一个 `InlineAssistant`，让画布节点上也能做大纲里那些事：
+     * `/` 斜杠菜单、`[[` 块引用搜索、选中文字的浮动工具条、粘贴图片。
+     * 它**不是**复用宿主的 hint / toolbar —— 那两条路实测走不通（详见该模块的注释）。
+     *
+     * @param force 保留参数：强制就地编辑。历史上用于「插入即编辑」跳过回源分流，
+     *   现在分流已取消，行为与普通调用一致，仅为不改动调用点而保留。
+     */
     private beginEdit(n: MMNode, force = false) {
         if (!this.options.editable || !n.contentId) return;
         const el = n.el;
         if (!el || el.hasAttribute(EDIT_FLAG)) return;
-
-        if (!force && hasInlineFormat(n)) {
-            this.cb.onEditInSource(n);
-            return;
-        }
+        void force;
 
         const txt = el.querySelector<HTMLElement>(".mm-txt");
         if (!txt) return;
@@ -3800,47 +3834,104 @@ export class MindMapView {
         el.setAttribute(EDIT_FLAG, "1");
         el.classList.add("mm-editing");
 
-        const original = n.text;
         const savedHtml = n.html;
-        txt.textContent = original;
+        // 进编辑态就把**完整行内 HTML** 放进去，而不是纯文本 ——
+        // 这样用户改文字时，双链 / 图片 / 公式原样留在编辑框里，提交时也带得回去
+        txt.innerHTML = savedHtml;
         txt.setAttribute("contenteditable", "true");
         txt.setAttribute("spellcheck", "false");
 
-        // 全选，方便直接改写
-        try {
-            const range = document.createRange();
-            range.selectNodeContents(txt);
-            const sel = window.getSelection();
-            sel?.removeAllRanges();
-            sel?.addRange(range);
-        } catch {
-            /* 选区失败不影响编辑本身 */
+        /**
+         * 「什么都没改」的判据基准。
+         *
+         * 不能直接拿 `savedHtml` 比 —— `innerHTML` 赋值再读回来会被浏览器归一化
+         * （属性顺序、布尔属性、自闭合写法），而且 `prepareInlineForWrite` 还会
+         * 收窄行内公式的 KaTeX 产物。拿未归一化的原文去比，会出现
+         * 「用户没动过、却回写了一次」的假提交（写进内核就有一次 undo 记录）。
+         * 所以基准取「刚写进去、再从活 DOM 读出来、过一遍同一个收窄函数」的结果。
+         */
+        const baseline = prepareInlineForWrite(txt.innerHTML);
+
+        /**
+         * 光标落点：纯文本节点全选（方便直接改写），**含行内格式的节点落在末尾**。
+         *
+         * 含格式的节点不能全选：全选之后随手敲一个字就把双链 / 图片 / 公式一起替换掉了，
+         * 而那些东西在编辑框里只是普通文字与缩略图，用户根本看不出自己删了什么。
+         * 要全选用户自己按 Ctrl+A。
+         *
+         * ⚠️ 「末尾」必须走 `caretToEnd()`，它会**先补一个零宽空格**再落光标 ——
+         * 直接把光标设在「最后一个行内元素之后的边界」上，Blink 会把它归一化到
+         * **那个元素内部**，接着敲的字会变成那个双链的锚文本（实测：
+         * 「甲一 · 粗体与双链并存((锚文本))」后面打「补充」，kramdown 变成
+         * `((… "锚文本补充"))`）。用户看到的光标和字都在末尾，看不出异常，但语义变了。
+         * 六种落法的并排实测与原因见 `utils/caret.ts` 的文件头。
+         */
+        if (hasInlineTag(savedHtml)) {
+            caretToEnd(txt);
+        } else {
+            try {
+                const range = document.createRange();
+                range.selectNodeContents(txt);
+                const sel = window.getSelection();
+                sel?.removeAllRanges();
+                sel?.addRange(range);
+            } catch {
+                /* 选区失败不影响编辑本身 */
+            }
         }
         txt.focus();
 
+        const assistant = new InlineAssistant({
+            txt,
+            layer: this.rootEl,
+            node: n,
+            rootId: () => this.docRootId(n),
+            t: (key, fallback, vars) => this.t(key, fallback, vars),
+            notify: (text) => showMessage(text, 4000, "error"),
+            onInput: () => {
+                // 编辑框内容变了，节点尺寸多半也变了 —— 下一帧重算一次布局
+                this.pendingRender = true;
+            },
+        });
+        this.assistant = assistant;
+
         let done = false;
         let blurTimer = 0;
+        const onInputEv = () => assistant.onInput();
+        const onSelectEv = () => assistant.onSelection();
         const cleanup = () => {
             txt.removeEventListener("keydown", onKey);
             txt.removeEventListener("blur", onBlur);
             txt.removeEventListener("paste", onPaste);
+            txt.removeEventListener("input", onInputEv);
+            txt.removeEventListener("mouseup", onSelectEv);
+            txt.removeEventListener("keyup", onSelectEv);
             if (blurTimer) {
                 window.clearTimeout(blurTimer);
                 blurTimer = 0;
             }
+            assistant.destroy();
+            if (this.assistant === assistant) this.assistant = null;
         };
         const finish = (commit: boolean, refocus = false) => {
             if (done) return;
             done = true;
+            const nextHtml = prepareInlineForWrite(txt.innerHTML);
+            const nextText = (txt.textContent ?? "").replace(/\s+/g, " ").trim();
+            // 外壳要在**还原之前**从源块上读（还原只动 .mm-txt、不影响源列表，
+            // 但把读取放在这里更稳：此刻节点与源块一定都还在）
+            const shell = this.sourceShell(n);
             cleanup();
             this.editing = null;
             el.removeAttribute(EDIT_FLAG);
             el.classList.remove("mm-editing");
             txt.removeAttribute("contenteditable");
-
-            const next = (txt.textContent ?? "").replace(/\s+/g, " ").trim();
             txt.innerHTML = savedHtml; // 先还原；提交成功后外部会整体重渲染
-            if (commit && !this.destroyed && next && next !== original) this.cb.onRename(n, next);
+
+            // 与 `baseline` 比，而不是与 `savedHtml` 比（见 baseline 的注释）
+            if (commit && !this.destroyed && nextHtml !== baseline) {
+                this.cb.onRename(n, { html: nextHtml, text: nextText, shell });
+            }
 
             // 补做编辑期间被挡下的渲染。
             // 延后一拍：此刻还在 blur / keydown 的处理栈里，直接重建 DOM
@@ -3870,6 +3961,9 @@ export class MindMapView {
         };
         const onKey = (e: KeyboardEvent) => {
             e.stopPropagation();
+            // 浮层优先消费：Esc 要逐级退出（先关浮层，再退编辑态），
+            // ↑↓/Enter 是菜单导航 —— 不先问它，用户一按 Esc 就被踢出编辑态了
+            if (assistant.handleKey(e)) return;
             if (e.key === "Enter") {
                 e.preventDefault();
                 // 第二个参数 = 键盘主动退出 → 把焦点还给导图（见 finish 里的长注释）
@@ -3885,6 +3979,9 @@ export class MindMapView {
          * ⚠️ 必须延后一拍再判断，而且要先确认焦点没落回本节点内部：
          * 点节点 padding、点悬停操作条这类操作都会让 txt 先 blur，
          * 紧接着焦点又回到节点里 —— 直接提交的话，用户会莫名其妙被踢出编辑态。
+         *
+         * ⚠️ 还要认「焦点在本插件的浮层里」：块引用搜索 / 链接表单 / 图片表单都会把焦点
+         *    移进浮层的输入框，只看 `el.contains(ae)` 的话，一点开搜索编辑态就结束了。
          */
         const onBlur = () => {
             if (blurTimer) window.clearTimeout(blurTimer);
@@ -3892,12 +3989,14 @@ export class MindMapView {
                 blurTimer = 0;
                 if (done || this.destroyed) return;
                 const ae = document.activeElement;
-                if (ae && el.contains(ae)) return; // 焦点还在本节点里 → 继续编辑
+                if (ae && (el.contains(ae) || assistant.ownsFocus(ae))) return; // 焦点还在编辑上下文里 → 继续编辑
                 finish(true);
             }, 0);
         };
         const onPaste = (e: ClipboardEvent) => {
-            // 强制纯文本，避免把富文本结构粘进节点
+            // 图片交给辅助模块上传（它认得剪贴板里的文件）；其余强制纯文本，
+            // 避免把网页的富文本结构（表格 / 嵌套 div / 内联样式）粘进节点
+            if (assistant.onPaste(e)) return;
             e.preventDefault();
             const text = e.clipboardData?.getData("text/plain") ?? "";
             document.execCommand("insertText", false, text);
@@ -3906,6 +4005,44 @@ export class MindMapView {
         txt.addEventListener("keydown", onKey);
         txt.addEventListener("blur", onBlur);
         txt.addEventListener("paste", onPaste);
+        txt.addEventListener("input", onInputEv);
+        txt.addEventListener("mouseup", onSelectEv);
+        txt.addEventListener("keyup", onSelectEv);
+    }
+
+    /**
+     * 文档根块 ID（块引用搜索的 `rootID`）。
+     *
+     * 从 `.protyle-title` 的 `data-node-id` 读 —— 那是思源自己放在文档标题上的属性。
+     * 三条兜底，因为三种挂载形态的 DOM 位置完全不同：
+     *   · 行内视图：`.mm-root` 就在 `.protyle-wysiwyg` 里；
+     *   · 全屏弹窗 / 并排面板：`.mm-root` 挂在 Dialog / 面板里，得从 `document` 找；
+     *   · 都找不到（比如文档刚被换掉）：退回列表块 ID —— 内核至少还能按它定位到文档。
+     */
+    private docRootId(n: MMNode): string {
+        const scope = this.rootEl.closest(".protyle") ?? document.querySelector(".protyle");
+        const title = scope?.querySelector<HTMLElement>(".protyle-title");
+        return title?.dataset.nodeId ?? n.listId;
+    }
+
+    /**
+     * 读源列表里那个内容块的**写回外壳**（开标签 + 里层有没有可编辑容器）。
+     *
+     * 写回走 DOM 通道时，外壳写错会**改掉块类型** —— 实测把外壳写死成
+     * `NodeParagraph` 时，改一个标题节点会把标题降级成段落（块 ID 还在、级别没了）。
+     * 所以外壳只能从源块上抄。
+     *
+     * 源列表在导图模式下是 `display:none`，但 `querySelector` 照样找得到。
+     * 找不到就返回 null，由写回方退回「段落」这个最常见形状。
+     */
+    private sourceShell(n: MMNode): MMBlockShell | null {
+        try {
+            const li = document.querySelector<HTMLElement>(`.protyle-wysiwyg .li[data-node-id="${n.id}"]`);
+            if (li) return shellOf(li);
+        } catch {
+            /* 查不到就按最常见形态走 */
+        }
+        return null;
     }
 
     /* ==================================================================== 行内交互 */
@@ -4223,8 +4360,9 @@ export class MindMapView {
             this.openMarkPopover(n),
         );
 
-        const rich = hasInlineFormat(n);
-        item(rich ? this.t("menu.editInSource", "回到原文编辑（保留格式）") : this.t("menu.editText", "编辑文字"), "F2", !this.options.editable || !canEdit(n), () =>
+        // 就地编辑现在也维护行内 HTML（含双链 / 图片 / 公式的节点照样能改），
+        // 所以这里**不再**按 `hasInlineFormat` 分流 —— 那条分流会把用户整个踢出导图。
+        item(this.t("menu.editText", "编辑文字"), "F2", !this.options.editable || !canEdit(n), () =>
             this.beginEdit(n),
         );
         item(this.t("menu.insertChild", "插入子节点"), "Tab", false, () => act("insertChild"));
@@ -4248,6 +4386,10 @@ export class MindMapView {
         item(this.t("menu.quickCopy", "快速复制"), "Ctrl D", !n.id, () => act("duplicate"));
         item(this.t("menu.copyText", "复制文字"), "", false, () => void this.copyNodeText(n));
         item(this.t("menu.locateInEditor", "定位到编辑器"), "", !n.id, () => this.cb.onLocate(n.id));
+        // 与上面那条的区别：这条会把光标放进段落、并在底部留一个「回到导图」按钮。
+        // 留着它是因为有些事确实在大纲里做更顺（多行粘贴、拖拽排序、块菜单），
+        // 但**不再是**「含格式节点」的必经之路了。
+        item(this.t("menu.editInOutline", "回到大纲编辑"), "", !n.contentId, () => this.cb.onEditInSource(n));
         menu.addItem({ type: "separator" });
         item(
             n.children.length > 0 ? this.t("menu.deleteNodeN", "删除节点（含 {n} 个子节点）", { n: n.children.length }) : this.t("menu.deleteNode", "删除节点"),

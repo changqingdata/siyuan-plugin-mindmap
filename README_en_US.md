@@ -114,7 +114,24 @@ The toolbar on the map offers layout switching, status filters, zoom controls, f
 - **Ctrl + wheel** (⌘ on macOS) to zoom
 - **Drag empty space** to pan
 - **Click a node** to select and focus that branch
-- **Double-click a node** to edit its text — Enter commits, Esc cancels
+- **Double-click a node** to edit its text — Enter commits, Esc cancels. Existing block refs / images /
+  bold / formulas **show up in the editor as-is**, and editing the words alone won't wipe them out
+- **Insert inline content right on the canvas** (no trip back to the outline):
+
+  | What you want | How |
+  | --- | --- |
+  | Image / hyperlink / block ref / tag / inline formula | Type `/` for the **slash menu**, keep typing to filter, press Enter |
+  | Block ref (two-way link) | Type `[[` for **block-ref search**, type a keyword, pick with ↑↓, press Enter |
+  | Bold / italic / underline / strikethrough / highlight / inline code | **Select the text**, then click a button on the floating **toolbar** |
+  | Turn the selection into a link or a block ref, or clear formatting | The three buttons on the right of that same toolbar |
+  | Paste an image | Just `Ctrl + V` inside the node — the image is uploaded to `assets/` and inserted |
+
+  > The slash menu only triggers **at the start of a word** (start of line, or after a space) —
+  > the same as inside SiYuan's own editor.
+  > A node that already contains inline formatting puts the caret at the **end** rather than selecting
+  > everything: with a full selection, one stray keystroke would replace the block refs and images
+  > along with the text, and inside the editor those are just plain text and thumbnails — you can't
+  > see what you're deleting.
 - **Ctrl / ⌘ + double-click a node** to drill down into that branch; the breadcrumb walks back out
 - **Drag a node** onto another to restructure: drop on the upper / lower edge to become a sibling, drop in the middle to become a child
 - **Right-click a node** for the action menu
@@ -184,9 +201,16 @@ npm run visual     # headless-browser acceptance run (real rendering, real key e
 npm run live       # live run against a real SiYuan kernel + web frontend
 npm run typecheck
 npm run check      # the whole pipeline in one go
-npm run check:all  # build + tests + browser acceptance
+npm run check:all  # build + tests + browser acceptance (includes the caret-boundary probe)
 npm run deploy     # build + sync into the SiYuan workspace
 ```
+
+> `npm run probe:caret` pins down a **Blink behaviour**: a caret placed at the boundary
+> *after* an inline element gets normalised to the **inside** of that element — so with a block
+> ref at the end of a node, the characters you type become that ref's anchor text. It reproduces
+> the problem on a `data:` page (and asserts both the six wrong placements and the two right ones),
+> so it needs **no running SiYuan** — which is why it is part of `check:all`.
+> See the header of `src/utils/caret.ts`.
 
 Place this folder under `{workspace}/data/plugins/`; SiYuan loads `index.js` and `index.css` directly.
 

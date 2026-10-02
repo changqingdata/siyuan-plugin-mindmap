@@ -219,7 +219,7 @@ function mount(
             onExit: () => void (rec.exits += 1),
             onLayoutChange: (k) => void rec.layouts.push(k),
             onFullscreen: () => void (rec.fullscreen += 1),
-            onRename: (node, text) => void rec.renames.push({ id: node.id ?? "", text }),
+            onRename: (node, edit) => void rec.renames.push({ id: node.id ?? "", text: edit.text }),
             onNodeAction: (kind, node) => void rec.actions.push({ kind, text: node.text }),
             onBatchAction: (kind: MMBatchKind, nodes) =>
                 void rec.batch.push(`${kind}×${nodes.length}`),

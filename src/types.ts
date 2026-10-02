@@ -457,6 +457,47 @@ export interface MMSearchHit {
 }
 
 /**
+ * 内容块的**写回外壳** —— 决定 DOM 通道怎么把整个块拼回去。
+ *
+ * ## 为什么必须照源块拼，不能写死
+ *
+ * `updateBlock(dataType:"dom")` 收到什么 DOM，就把块变成什么块。实测（思源 3.8.6）：
+ *
+ *   写**裸行内片段** → 标题**被降级成段落**（块 ID 还在，级别丢了）
+ *   写 `<div data-type="NodeParagraph" class="p">…</div>` → 标题**同样被降级**
+ *   写源块自己的开标签 + 里层可编辑 div → 段落 / h1 / h2 / h3 **类型与级别全部原样**
+ *
+ * 所以外壳只能从源块上抄。踩过的坑是「想当然」：先以为标题是
+ * 「元素自己可编辑」，其实标题的 DOM 形状和段落**一模一样**，都是
+ * `<div data-type="NodeHeading" class="h1"><div contenteditable="true">…</div><div class="protyle-attr">…</div></div>`。
+ */
+export interface MMBlockShell {
+    /** 源块的开标签（含属性，已剔掉 `updated` / `data-node-index` 这类易变属性） */
+    open: string;
+    /** 标签名，收尾用 */
+    tag: string;
+    /** 里层是否有 `contenteditable` 容器 —— 有则写回时要补里层 + `protyle-attr` */
+    wrap: boolean;
+}
+
+/**
+ * 就地编辑提交的结果。
+ *
+ * 为什么不是直接传一个字符串：编辑面现在维护的是 `innerHTML`（这样才不会把节点里的
+ * 双链 / 图片 / 加粗在提交时抹成纯文本），而写回内核有**两条通道**，需要按内容分流 ——
+ * 纯文本走 markdown（保住用户输入的 `*` `1.` 不被当语法），含标签的走 DOM。
+ * 两条通道要的信息不同（一条要纯文本、一条要 HTML 和外壳），所以打包成一个对象传。
+ */
+export interface MMEditResult {
+    /** 清洗过的行内 HTML（`prepareInlineForWrite` 的产物） */
+    html: string;
+    /** 同一份内容的纯文本 */
+    text: string;
+    /** 源块外壳；取不到时给 null，由写回方退回「段落」这个最常见形状 */
+    shell: MMBlockShell | null;
+}
+
+/**
  * 节点标记（P1-2）。
  *
  * 存在块属性 `custom-mindmap-mark` 上（见 `core/marks.ts`），

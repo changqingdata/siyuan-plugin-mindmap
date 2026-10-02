@@ -1,6 +1,6 @@
 import { fetchPost, fetchSyncPost } from "siyuan";
 import type { IWebSocketData } from "siyuan";
-import type { MMSearchHit } from "../types";
+import type { MMBlockShell, MMSearchHit } from "../types";
 
 /** 读取单个块的属性 */
 export async function getBlockAttrs(id: string): Promise<Record<string, string>> {
@@ -60,6 +60,65 @@ export async function updateBlock(id: string, markdown: string): Promise<boolean
         return res?.code === 0;
     } catch (err) {
         console.warn("[mindmap] 更新块失败", id, err);
+        return false;
+    }
+}
+
+/**
+ * 用 **DOM** 通道写回一个块的行内内容。
+ *
+ * ## 为什么必须多这一条通道
+ *
+ * markdown 通道（`updateBlock`）表达不了全部行内格式 —— 图片过不去（实测丢 src），
+ * 而且它会把内容**重新解析**一遍，用户输入里的 `*` `_` `1.` 会被当成 markdown 语法。
+ * 所以「就地编辑一个已经含格式的节点」只能走 DOM。
+ *
+ * ## 实测（思源 3.8.6）：喂进去的行内 HTML 原样落到 kramdown
+ *
+ *   `<span data-type="block-ref" data-id="…" data-subtype="s">锚文本</span>` → `((id "锚文本"))`
+ *   `<span data-type="a" data-href="…">官网</span>`                      → `[官网](https://…)`
+ *   `<span data-type="strong">粗体</span>`                                → `**粗体**`
+ *   `<span data-type="tag">标签</span>`                                   → `#标签#`
+ *   `<span data-type="inline-math" data-subtype="math" data-content="E=mc^2"></span>` → `$E=mc^2$`
+ *   `<span data-type="img"><img src="assets/x.png"></span>`               → `![](assets/x.png)`
+ *
+ * 三条不能想当然的细节（都实测过）：
+ *
+ * 1. **图片不能用 `data:` URL** —— kramdown 里会变成 `![]()`，src 直接丢；
+ *    必须先把文件落到 `assets/` 再用相对路径。
+ * 2. **标签 span 里不能带井号** —— `<span data-type="tag">#标签#</span>` 会落成
+ *    `##标签##`（多一对）。用户笔记里真实标签的 DOM 就是不带井号的
+ *    `<span data-type="tag">概念/交易成本</span>`，`#` 是 lute 序列化时加的。
+ * 3. **外壳必须照源块拼**（见下）。
+ *
+ * ## ⚠️ 外壳：写死 `NodeParagraph` 会把标题**降级成段落**
+ *
+ * `dataType: "dom"` 收到什么 DOM，块就变成什么块。实测四种写法：
+ *
+ *   裸行内片段                                → 标题降级成段落 ✗
+ *   `<div data-type="NodeParagraph" class="p">…` → 标题降级成段落 ✗
+ *   源块自己的开标签 + 里层可编辑 div            → 段落 / h1 / h2 / h3 类型与级别全部原样 ✓
+ *
+ * 所以外壳从源块上抄（`parser.shellOf`），本函数只负责把它拼起来。
+ *
+ * @param id 内容块 ID
+ * @param innerHtml 行内内容（**已清洗**，见 `parser.prepareInlineForWrite`）
+ * @param shell 源块外壳；给 `null` 时退回最常见的「段落」形状
+ */
+export async function updateBlockDom(id: string, innerHtml: string, shell: MMBlockShell | null): Promise<boolean> {
+    const s = shell ?? { open: `<div data-node-id="${id}" data-type="NodeParagraph" class="p">`, tag: "div", wrap: true };
+    const body = s.wrap
+        ? `<div contenteditable="true" spellcheck="false">${innerHtml}</div><div class="protyle-attr" contenteditable="false">\u200b</div>`
+        : innerHtml;
+    try {
+        const res = await fetchSyncPost("/api/block/updateBlock", {
+            dataType: "dom",
+            data: `${s.open}${body}</${s.tag}>`,
+            id,
+        });
+        return res?.code === 0;
+    } catch (err) {
+        console.warn("[mindmap] 以 DOM 写回块失败", id, err);
         return false;
     }
 }
@@ -461,6 +520,108 @@ export async function searchDocOutline(listId: string, q: string): Promise<MMSea
     // 命中多的场合，短的（更靠近根）排前面 —— 用户多半在找「那一大类」
     out.sort((a, b) => a.path.length - b.path.length);
     return out.slice(0, 50);
+}
+
+/* ==================================================================== 行内编辑用的内核接口 */
+
+/** 双链搜索的一条候选 */
+export interface MMRefHit {
+    /** 被引用块的 ID */
+    id: string;
+    /** 锚文本（思源自己插入双链时用的就是它） */
+    refText: string;
+    /** 块类型（NodeParagraph / NodeHeading…），用于显示 */
+    type: string;
+    /** 块所在文档标题 */
+    docTitle: string;
+    /** 是否命中动态锚文本（思源用来决定要不要加 `""`） */
+    dynamic?: boolean;
+}
+
+/**
+ * 块引用搜索（`[[` 的候选来源）。
+ *
+ * ⚠️ `beforeLen` 是**必需**字段 —— 不带它会直接报
+ * `Field [beforeLen] is required`（实测 3.8.5）。它是「光标前已有多少字符」，
+ * 内核用它算动态锚文本的截断长度。我们插的是静态锚文本，给 0 即可。
+ *
+ * ⚠️ 这里用**异步** `fetchPost` 而不是 `fetchSyncPost`：搜索是逐键触发的，
+ * 同步 XHR 会把渲染进程主线程整个卡住（同 `setOutlineFold` 那条注释里的教训）。
+ * 但 `fetchPost` 是回调式的，所以要自己包一层 Promise。
+ */
+export function searchRefBlocks(keyword: string, rootId = "", beforeLen = 0): Promise<MMRefHit[]> {
+    return new Promise((resolve) => {
+        let settled = false;
+        const done = (v: MMRefHit[]) => {
+            if (settled) return;
+            settled = true;
+            resolve(v);
+        };
+        // 兜底：网络异常时 `fetchPost` 的 failCallback 不一定被调，超时也要放行，
+        // 否则搜索框会一直停在「搜索中…」。
+        const timer = setTimeout(() => done([]), 6000);
+        fetchPost(
+            "/api/search/searchRefBlock",
+            { k: keyword, id: rootId, rootID: rootId, beforeLen },
+            (res) => {
+                clearTimeout(timer);
+                if (res?.code !== 0) return done([]);
+                /*
+                 * ⚠️ 返回的是 `data: { reqId, blocks: [...] }`，**不是** `data: [...]`。
+                 *
+                 * 按数组解会拿到 undefined，`.map` 当场抛 —— 而抛出点在 `fetchPost` 的
+                 * 回调里，**没有人接**，于是 `done()` 永远不被调用：搜索框一直停在
+                 * 「搜索中…」，要等 6 秒超时兜底才变成空列表。
+                 * 实测（思源 3.8.6）就是这个现象，界面上看起来像「搜不到东西」。
+                 *
+                 * `Array.isArray` 那条分支是防御：万一以后内核改成直接回数组。
+                 */
+                const payload = res.data as { blocks?: Array<Record<string, unknown>> } | Array<Record<string, unknown>> | undefined;
+                const rows = Array.isArray(payload) ? payload : (payload?.blocks ?? []);
+                done(
+                    rows.map((r) => ({
+                        id: String(r.id ?? ""),
+                        refText: String(r.refText ?? r.fcontent ?? ""),
+                        type: String(r.type ?? ""),
+                        docTitle: String(r.hPath ?? r.docTitle ?? ""),
+                        dynamic: !!r.dynamic,
+                    })),
+                );
+            },
+        );
+    });
+}
+
+/**
+ * 上传一个文件到 `assets/`，返回可直接写进 markdown 的路径（形如 `assets/xxx.png`）。
+ *
+ * ⚠️ 走的是 **multipart**，不能用 `fetchSyncPost`（它按 JSON 发，
+ * 实测会得到 `request Content-Type isn't multipart/form-data`）。
+ *
+ * ⚠️ 返回值**不能**用 `data:` URL 替代 —— 实测 `updateBlock(dataType:"dom")`
+ * 遇到 `data:` URL 时 kramdown 里会变成 `![]()`，src 直接丢。
+ *
+ * @param assetsDirPath 资源目录，形如 `/assets/`（相对于工作空间 data 目录）
+ */
+export async function uploadAsset(file: File, assetsDirPath = "/assets/"): Promise<string | null> {
+    try {
+        const form = new FormData();
+        form.append("assetsDirPath", assetsDirPath);
+        form.append("file[]", file, file.name);
+        const res = await fetch("/api/asset/upload", {
+            method: "POST",
+            headers: { Authorization: `Token ${window.siyuan?.config?.api?.token ?? ""}` },
+            body: form,
+        });
+        const json = (await res.json()) as { code?: number; data?: { succMap?: Record<string, string> } };
+        if (json?.code !== 0) return null;
+        const succ = json.data?.succMap ?? {};
+        const first = Object.values(succ)[0];
+        return typeof first === "string" && first ? first : null;
+    } catch (err) {
+        console.warn("[mindmap] 上传资源失败", err);
+        return null;
+    }
 }
 
 /**

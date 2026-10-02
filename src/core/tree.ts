@@ -63,13 +63,30 @@ export function escapeMd(text: string): string {
 const HAS_TAG = /<(?!br\s*\/?>)[a-z!/][^>]*>/i;
 
 /**
+ * 「这段行内 HTML 里带了标签吗」。
+ *
+ * 现在唯一的用途是**写回通道分流**（`actions.renameNode`）：
+ * 纯文本走 markdown + `escapeMd`（用户输入的 `1. 测试` 是字面量，不该被解析成有序列表），
+ * 含标签走 DOM 通道（markdown 通道会丢图片 src、也会二次解析用户输入）。
+ *
+ * 这个正则原先在本文件和 `actions.ts` 各写了一份，现已收敛到一处。
+ */
+export function hasInlineTag(html: string): boolean {
+    return HAS_TAG.test(html);
+}
+
+/**
  * 节点是否含行内格式（加粗 / 双链 / 公式 / 图片 / 颜色……）。
  *
- * 用来决定「改名」该走哪条路：纯文本节点可以就地改（轻快），
- * 含格式的节点**必须回到源列表改** —— 就地编辑写回的是纯文本，会把格式抹掉。
+ * ⚠️ 它**不再**决定「改名该走哪条路」了。以前是「含格式的节点不就地编辑、
+ * 弹回源列表改」，因为就地编辑只拿得到 `textContent`，会把格式静默抹成纯文本；
+ * 现在编辑面维护完整 `innerHTML` 并有 DOM 写回通道，含格式的节点也能就地改
+ * （见 `renderer.beginEdit` 与 `actions.renameNode`），那条分流已经取消。
+ *
+ * 留作「这个节点是不是纯文本」的判据（测试与调试用）。
  */
 export function hasInlineFormat(node: MMNode): boolean {
-    return HAS_TAG.test(node.html ?? "");
+    return hasInlineTag(node.html ?? "");
 }
 
 const IMG_SPAN_RE = /<span[^>]*data-type="img"[^>]*>\s*<img\b([^>]*?)\/?>\s*<\/span>/gi;

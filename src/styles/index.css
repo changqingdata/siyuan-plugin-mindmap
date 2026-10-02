@@ -383,6 +383,314 @@
     font-weight: 600;
 }
 
+/* ---------------------------------------------------------------- 行内输入辅助浮层
+
+   斜杠菜单 / 块引用搜索 / 参数表单 / 选中工具条共用一层外壳（`.mm-inline-pop`）。
+   四条硬约束，都是踩出来的：
+
+   1. **`position: absolute`，且住在 `.mm-root` 里。**
+      挂 `.mm-root` 是为了继承 `--mm-*` 主题变量；不进流是为了不推动画布
+      （项目里「批量操作条一出现就把画布推下去 40px、导致 Ctrl+双击下钻整条链路失效」
+      就是进流造成的）。画布的缩放写在 `.mm-world` 的 `style.zoom` 上，
+      `.mm-root` 本身不受缩放影响，所以 JS 侧定位用「两者 rect 相减」，**不需要乘缩放**。
+   2. `z-index: 20` 与 `.mm-mark-pop` 对齐 —— 都在悬停操作条、连线之上。
+   3. `contenteditable="false"` 由 JS 设（不设的话浏览器会把浮层当可编辑区，光标能跑进去）。
+   4. 浮层里的输入框**必须显式给 `color`**：`.mm-root` 的 `color` 在 `.mm-txt` 上，
+      浮层是它的兄弟而不是后代，继承不到，不给就变成黑字配深色底。
+
+   浮层本身不加 `user-select: none`：块引用列表要能拖选文字、搜索框要能选词。 */
+.mm-root .mm-inline-pop {
+    position: absolute;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 200px;
+    padding: 8px 10px;
+    border: 1px solid var(--mm-node-border);
+    border-radius: 10px;
+    background: var(--mm-canvas-solid);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
+    color: var(--mm-node-text);
+    font-family: inherit;
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+/* 浮层里所有输入控件的共同底色规则：透明 + 只靠边框分层，
+   这样在浅色 / 深色主题下都不会出现「白底白字」。 */
+.mm-root .mm-inline-pop input {
+    color: var(--mm-node-text);
+    font-family: inherit;
+}
+
+/* ---- 斜杠菜单 ---- */
+.mm-root .mm-inline-pop .mm-slash-cap {
+    padding: 0 2px 2px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    opacity: 0.55;
+}
+
+.mm-root .mm-inline-pop .mm-slash-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    /* 候选最多 8 条，但仍给个上限：以后加条目不会把浮层撑到屏幕外 */
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+.mm-root .mm-inline-pop .mm-slash-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 4px 7px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font-family: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.mm-root .mm-inline-pop .mm-slash-item:hover,
+.mm-root .mm-inline-pop .mm-slash-item.mm-on {
+    background: color-mix(in srgb, var(--mm-accent) 18%, transparent);
+}
+
+.mm-root .mm-inline-pop .mm-slash-hint {
+    flex: 0 0 auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    opacity: 0.5;
+}
+
+/* ---- 块引用搜索 ---- */
+.mm-root .mm-inline-pop.mm-ref {
+    min-width: 300px;
+    max-width: 380px;
+}
+
+.mm-root .mm-inline-pop .mm-ref-input {
+    padding: 4px 7px;
+    border: 1px solid color-mix(in srgb, var(--mm-node-text) 22%, transparent);
+    border-radius: 6px;
+    background: transparent;
+    font-size: 12.5px;
+    outline: none;
+}
+
+.mm-root .mm-inline-pop .mm-ref-input:focus {
+    border-color: var(--mm-accent);
+}
+
+.mm-root .mm-inline-pop .mm-ref-input::placeholder {
+    color: var(--mm-node-text);
+    opacity: 0.42;
+}
+
+.mm-root .mm-inline-pop .mm-ref-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.mm-root .mm-inline-pop .mm-ref-item {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 4px 7px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font-family: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.mm-root .mm-inline-pop .mm-ref-item:hover,
+.mm-root .mm-inline-pop .mm-ref-item.mm-on {
+    background: color-mix(in srgb, var(--mm-accent) 18%, transparent);
+}
+
+/* 长块文字要截断，否则一条候选能占三行、列表滚起来完全看不清 */
+.mm-root .mm-inline-pop .mm-ref-text,
+.mm-root .mm-inline-pop .mm-ref-doc {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mm-root .mm-inline-pop .mm-ref-doc {
+    font-size: 11px;
+    opacity: 0.5;
+}
+
+.mm-root .mm-inline-pop .mm-ref-empty {
+    padding: 6px 7px;
+    font-size: 12px;
+    opacity: 0.5;
+}
+
+.mm-root .mm-inline-pop .mm-ref-foot {
+    padding-top: 2px;
+    font-size: 11px;
+    opacity: 0.45;
+}
+
+/* ---- 参数表单（链接 / 标签 / 公式 / 图片） ---- */
+.mm-root .mm-inline-pop.mm-form {
+    min-width: 268px;
+}
+
+.mm-root .mm-inline-pop .mm-form-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.mm-root .mm-inline-pop .mm-form-cap {
+    flex: 0 0 46px;
+    font-size: 11.5px;
+    opacity: 0.6;
+}
+
+.mm-root .mm-inline-pop .mm-form-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 3px 6px;
+    border: 1px solid color-mix(in srgb, var(--mm-node-text) 22%, transparent);
+    border-radius: 6px;
+    background: transparent;
+    font-size: 12px;
+    outline: none;
+}
+
+.mm-root .mm-inline-pop .mm-form-input:focus {
+    border-color: var(--mm-accent);
+}
+
+.mm-root .mm-inline-pop .mm-form-input::placeholder {
+    color: var(--mm-node-text);
+    opacity: 0.42;
+}
+
+.mm-root .mm-inline-pop .mm-form-file {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 12px;
+}
+
+.mm-root .mm-inline-pop .mm-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 2px;
+}
+
+.mm-root .mm-inline-pop .mm-form-actions button {
+    padding: 3px 10px;
+    border: 1px solid color-mix(in srgb, var(--mm-node-text) 22%, transparent);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--mm-node-text);
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.mm-root .mm-inline-pop .mm-form-actions button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--mm-node-text) 10%, transparent);
+}
+
+/* 没选文件时「插入」是灰的 —— 但**不隐藏**，位置固定，
+   用户不会觉得「刚才那个按钮哪去了」 */
+.mm-root .mm-inline-pop .mm-form-actions button:disabled {
+    opacity: 0.38;
+    cursor: default;
+}
+
+.mm-root .mm-inline-pop .mm-form-ok {
+    border-color: var(--mm-accent);
+    color: var(--mm-accent);
+    font-weight: 600;
+}
+
+/* ---- 选中文字的浮动工具条 ---- */
+.mm-root .mm-inline-pop.mm-inline-bar {
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    padding: 3px 4px;
+    border-radius: 8px;
+}
+
+.mm-root .mm-inline-pop .mm-bar-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 24px;
+    padding: 0 4px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--mm-node-text);
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.mm-root .mm-inline-pop .mm-bar-btn:hover {
+    background: color-mix(in srgb, var(--mm-node-text) 12%, transparent);
+}
+
+/* 按钮字形直接模仿它要做的事 —— 「B」看起来就是粗的，
+   比给六个按钮配六个图标更快认 */
+.mm-root .mm-inline-pop .mm-bar-btn--strong {
+    font-weight: 700;
+}
+
+.mm-root .mm-inline-pop .mm-bar-btn--em {
+    font-style: italic;
+}
+
+.mm-root .mm-inline-pop .mm-bar-btn--u {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.mm-root .mm-inline-pop .mm-bar-btn--s {
+    text-decoration: line-through;
+}
+
+.mm-root .mm-inline-pop .mm-bar-btn--mark {
+    background: color-mix(in srgb, var(--mm-accent) 22%, transparent);
+}
+
+.mm-root .mm-inline-pop .mm-bar-btn--code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+}
+
+.mm-root .mm-inline-pop .mm-bar-sep {
+    width: 1px;
+    height: 16px;
+    margin: 0 3px;
+    background: color-mix(in srgb, var(--mm-node-text) 20%, transparent);
+}
+
 /* ---------------------------------------------------------------- 自绘 tooltip */
 
 .mm-tip {

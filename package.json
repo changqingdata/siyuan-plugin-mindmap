@@ -57,7 +57,7 @@
     "i18n:keys": "node scripts/i18n-keys.mjs --verify",
     "i18n:check": "npm run i18n:audit && npm run i18n:keys",
     "check": "node scripts/gen-style.mjs && tsc --noEmit && npm run typecheck:tests && npm run lint:tests && npm run i18n:check && node tests/run.mjs && node scripts/build.mjs --zip && npm run i18n:built && node tests/smoke.cjs",
-    "check:all": "npm run check && npm run visual",
+    "check:all": "npm run check && npm run visual && npm run probe:caret",
     "e2e:all": "npm run kernel:shapes && npm run kernel:restore && npm run kernel:focus && npm run kernel:inline:all && npm run kernel:image && npm run kernel:copy && npm run ux:tour && npm run ux:scale && npm run probe:mobile && npm run live && npm run live:gpu",
     "deploy": "node scripts/deploy.mjs",
     "verify": "node scripts/verify-install.mjs",
@@ -99,7 +99,9 @@
     "probe:taskcheck": "node tests/kernel/probe-task-check.mjs",
     "probe:taskclick": "node tests/kernel/probe-task-click.mjs",
     "probe:taskmarker": "node tests/kernel/probe-task-marker-api.mjs",
-    "probe:taskdom": "node tests/kernel/probe-task-node-dom.mjs"
+    "probe:taskdom": "node tests/kernel/probe-task-node-dom.mjs",
+    "probe:inline-canvas": "node tests/kernel/probe-inline-canvas.mjs",
+    "probe:caret": "node tests/kernel/probe-caret-boundary.mjs"
   },
   "keywords": [
     "siyuan",
