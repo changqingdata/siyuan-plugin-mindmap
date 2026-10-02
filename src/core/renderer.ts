@@ -446,6 +446,15 @@ export class MindMapView {
      * （见 beginEdit 的 onBlur）。
      */
     private assistant: InlineAssistant | null = null;
+    /**
+     * 「立刻收掉当前编辑态」的把手。
+     *
+     * 编辑态的收尾逻辑（`finish`）是 `beginEdit` 里的闭包，外面拿不到；
+     * 但「插入即编辑」必须能在**别的**节点正被编辑时把它收掉 —— 否则 `render()`
+     * 会被编辑态挡下（见 render 开头），新节点进不了 `byId`，聚焦就失败了。
+     * 详见 `revealAndEdit`。
+     */
+    private finishEditNow: ((commit: boolean) => void) | null = null;
 
     /** 编辑期间被挡下的渲染请求，退出编辑时补做一次 */
     private pendingRender = false;
@@ -724,6 +733,8 @@ export class MindMapView {
             this.gotoHitTimer = null;
         }
         this.editing = null;
+        // 视图没了，那个「收掉编辑态」的把手也跟着失效（`cleanup` 只在正常收尾时跑到）
+        this.finishEditNow = null;
         this.dragging = null;
         this.pendingDrop = null;
         this.clearIndicator();
@@ -2726,6 +2737,34 @@ export class MindMapView {
     /** 定位到某个节点并直接进入编辑态（插入新节点后用，见 Scanner 的 pendingEdit） */
     revealAndEdit(id: string): boolean {
         if (this.destroyed) return false;
+
+        /**
+         * ⚠️ 正在编辑**别的**节点时，必须先把那一次编辑收掉，而且**同步重建一次**。
+         *
+         * 不这么做的话：`render()` 在编辑态下只记一笔 `pendingRender` 就返回
+         * （见 `render` 开头），于是新节点根本没进 `byId`，下面直接 `return false` ——
+         * 用户看到的是「新建了节点，光标却还留在旧节点里，只有退出编辑才看见新节点」。
+         *
+         * 触发路径很常见：编辑着 A，点 A 的悬停 `+` 加子节点。那一下刻意**不**让
+         * `.mm-txt` 失焦（见 mousedown 的处理：正文放行、其余 `preventDefault`），
+         * 所以新节点就是在编辑态里建出来的。
+         *
+         * 收尾要 `commit = true`：用户可能已经改过旧节点的文字，丢掉就是数据损失。
+         * 没改过时 `finish` 自己会和基准线比对，不会产生假提交。
+         */
+        if (this.editing) {
+            if (this.editing.id === id) {
+                // 已经在编辑它了 —— 只补一次选中与高亮
+                this.rootEl.classList.add("mm-kbd");
+                this.select(this.editing);
+                this.ensureVisible(this.editing);
+                return true;
+            }
+            this.finishEditNow?.(true);
+            // 自己渲染，不让 finish 再排一次（它已经被要求不排了）
+            this.render();
+        }
+
         const n = this.byId.get(id);
         if (!n) return false;
         this.rootEl.classList.add("mm-kbd");
@@ -3912,8 +3951,9 @@ export class MindMapView {
             }
             assistant.destroy();
             if (this.assistant === assistant) this.assistant = null;
+            if (this.finishEditNow) this.finishEditNow = null;
         };
-        const finish = (commit: boolean, refocus = false) => {
+        const finish = (commit: boolean, refocus = false, deferRender = true) => {
             if (done) return;
             done = true;
             const nextHtml = prepareInlineForWrite(txt.innerHTML);
@@ -3936,11 +3976,17 @@ export class MindMapView {
             // 补做编辑期间被挡下的渲染。
             // 延后一拍：此刻还在 blur / keydown 的处理栈里，直接重建 DOM
             // 会和浏览器的焦点处理打架。
+            //
+            // ⚠️ `deferRender = false` 是给 `revealAndEdit` 用的：它要**同步**拿到
+            // 重建后的 `byId`（新节点才在里头），所以自己调 `render()`，
+            // 不能让这里再排一次 —— 排了就是一次多余的整图重建。
             if (this.pendingRender) {
                 this.pendingRender = false;
-                window.setTimeout(() => {
-                    if (!this.destroyed && !this.editing) this.render();
-                }, 0);
+                if (deferRender) {
+                    window.setTimeout(() => {
+                        if (!this.destroyed && !this.editing) this.render();
+                    }, 0);
+                }
             }
 
             /**
@@ -3959,6 +4005,9 @@ export class MindMapView {
              */
             if (refocus) this.restoreFocus();
         };
+        // 把「收掉编辑态」的把手交出去（见字段注释与 revealAndEdit）。
+        // `cleanup` 会把它清掉，所以它只在编辑态存续期间有效。
+        this.finishEditNow = (commit: boolean) => finish(commit, false, false);
         const onKey = (e: KeyboardEvent) => {
             e.stopPropagation();
             // 浮层优先消费：Esc 要逐级退出（先关浮层，再退编辑态），

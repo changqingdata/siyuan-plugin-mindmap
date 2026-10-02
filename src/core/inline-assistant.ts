@@ -157,6 +157,15 @@ export class InlineAssistant {
     private popItems: HTMLElement[] = [];
     private popIndex = 0;
     /**
+     * 这一次定位用的锚点（**视口坐标**，不是 `.mm-root` 坐标）。
+     *
+     * 留着它是为了「尺寸变了能重算」：浮层是**先矮后高**的 ——
+     * 刚建出来只有一个输入框，等候选填进来会长到三百多像素。
+     * 只记锚点、不记算完的 `left/top`，是因为钳制要用**当前**尺寸，
+     * 而当前尺寸在尺寸变化前根本算不出来。
+     */
+    private anchor: { x: number; top: number; bottom: number; preferAbove: boolean } | null = null;
+    /**
      * 斜杠菜单的全部候选项（含被关键词过滤掉的）。
      *
      * 与 `popItems` 分开是**必须的**：`popItems` 是「键盘能选到的那些」，
@@ -482,6 +491,23 @@ export class InlineAssistant {
         // 从**当前光标**重算范围是默认路径，所以不需要让旧触发串跨过 closePop：
         // 「斜杠菜单切块引用」那条路径已经先把 `/词` 换成了 `[[`，光标就在 `[[` 之后。
         this.triggerRange = presetRange ?? (caret ? this.makeRange(caret, backChars) : null);
+
+        /**
+         * ⚠️ 定位必须在这里做，而且要用**进函数时抓到的那个 `caret`**。
+         *
+         * 两个坑叠在一起，第一版整个漏了这一步，浮层于是停在「静态位置」——
+         * 绝对定位元素不设 `left`/`top` 时，浏览器把它摆在**包含块内容盒的左上角**，
+         * 也就是 `.mm-root` 的左上角（用户看到的就是「搜索框跑到画布左上角了」）。
+         *
+         *   1. `buildRefPop` 收尾会把焦点移进浮层的输入框，**之后**
+         *      `this.caretRange()` 一律返回 `null`（选区已经不在 `.mm-txt` 里了）；
+         *   2. 而 `openRefPop` 在浮层建好之后会被**再次**调用（继续打关键词时），
+         *      那一次 `caret` 就是 `null`，会直接 `return` —— 指望后面某次调用补上定位
+         *      是等不到的。
+         *
+         * `presetRange`（工具条路径）也是有效锚点：它就是用户选中的那段文字。
+         */
+        this.placeAtCaret(caret ?? presetRange ?? this.triggerRange);
         this.scheduleSearch(query);
     }
 
@@ -555,6 +581,8 @@ export class InlineAssistant {
             loading.textContent = this.o.t("ref.searching", "搜索中…");
             list.appendChild(loading);
         }
+        // 「搜索中…」占位同样会改高度（30 条候选 → 1 行），得跟着重算
+        this.reposition();
         this.searchTimer = window.setTimeout(() => {
             this.searchTimer = 0;
             void this.runSearch(query, seq);
@@ -576,6 +604,8 @@ export class InlineAssistant {
             list.appendChild(empty);
             this.popItems = [];
             this.popIndex = -1;
+            // 空态比候选态矮得多：不重算的话，浮层会「悬在」一个旧位置上
+            this.reposition();
             return;
         }
 
@@ -1115,6 +1145,9 @@ export class InlineAssistant {
         this.popItems = [];
         this.slashRows = [];
         this.popIndex = 0;
+        // 锚点属于「这一次弹出的浮层」：留着它，下一次 open 会先记新锚点，
+        // 但 destroy() / Esc 之后再有人手滑调 reposition() 就会摆到旧位置上去
+        this.anchor = null;
         if (this.searchTimer) {
             window.clearTimeout(this.searchTimer);
             this.searchTimer = 0;
@@ -1128,6 +1161,11 @@ export class InlineAssistant {
     }
 
     private paintItems() {
+        // ⚠️ 高亮行不改变尺寸，但**滚动**会：`paintItems` 走的是「方向键换选中项」，
+        // 选中项滚出可视区时 `.mm-ref-list` 会自己滚（列表有 overflow-y），
+        // 而浮层高度不变、位置也不该变 —— 所以这里只需要保证「尺寸已经定下来了」。
+        // 放在这里是为了让「填完候选 → 高亮」这条路径不可能漏掉重定位。
+        this.reposition();
         this.popItems.forEach((el, i) => el.classList.toggle("mm-on", i === this.popIndex));
     }
 
@@ -1139,6 +1177,8 @@ export class InlineAssistant {
      * `.mm-root` 本身不受缩放影响，所以用「两者 rect 相减」即可，**不需要乘 scale**。
      * 这比挂到 `document.body` 再乘缩放比稳得多（缩放是 `zoom` 不是 `transform`，
      * 混用两套坐标最容易在某个缩放档位上飘）。
+     *
+     * ⚠️ 这里只**记锚点**，真正的摆放交给 `reposition()` —— 因为「摆一次」不够。
      */
     private placeAtCaret(range: Range | null) {
         if (!this.pop) return;
@@ -1155,7 +1195,7 @@ export class InlineAssistant {
             const n = this.txt.getBoundingClientRect();
             rect = new DOMRect(n.left, n.bottom, 0, 0);
         }
-        this.place(rect.left, rect.bottom + 4, false);
+        this.place(rect.left, rect.top, rect.bottom, false);
     }
 
     private placeAt(range: Range) {
@@ -1166,21 +1206,60 @@ export class InlineAssistant {
             rect = null;
         }
         if (!rect) return this.placeAtCaret(null);
-        this.place(rect.left, rect.top - 8, true);
+        this.place(rect.left, rect.top, rect.bottom, true);
     }
 
-    private place(viewportX: number, viewportY: number, above: boolean) {
+    /** 记下锚点后立刻摆一次；之后**尺寸一变就得再调 `reposition()`** */
+    private place(viewportX: number, viewportTop: number, viewportBottom: number, preferAbove: boolean) {
+        this.anchor = { x: viewportX, top: viewportTop, bottom: viewportBottom, preferAbove };
+        this.reposition();
+    }
+
+    /**
+     * 按**记下来的锚点**重算浮层位置。尺寸变了（候选填进来 / 换关键词 / 出空态）必须调一次。
+     *
+     * ⚠️ 这条是「定位只做一次」的第二层坑，和「浮层跑到画布左上角」是两回事：
+     *
+     *   1. 建浮层时它只有**一个输入框**（矮），`maxTop` 是按这个高度算的；
+     *   2. 30 条候选填进来后它长到 300+ 高（`.mm-ref-list` 自己有 `max-height: 240px`），
+     *      于是底部越出 `.mm-root` —— 而 `.mm-root` 是 `overflow: hidden`，
+     *      多出来的那截被**裁掉**（症状不是「看不见」，是「少一块」，很容易漏诊）；
+     *   3. 所以「只在开浮层时定位」必然漏掉长列表这一半。
+     *
+     * 顺带做了**翻面**：下方摆不下就挪到锚点上方。锚点上方也摆不下时才退回
+     * 「下方 + 钳制」—— 那种情况说明画布本身就很矮，至少让输入框那一段可见。
+     */
+    private reposition() {
         const pop = this.pop;
-        if (!pop) return;
+        const a = this.anchor;
+        if (!pop || !a) return;
+
         const layerRect = this.layer.getBoundingClientRect();
         const pr = pop.getBoundingClientRect();
-        let left = viewportX - layerRect.left;
-        let top = viewportY - layerRect.top - (above ? pr.height : 0);
+        const layerW = this.layer.clientWidth;
+        const layerH = this.layer.clientHeight;
+        const PAD = 8;
 
-        const maxLeft = this.layer.clientWidth - pr.width - 8;
-        const maxTop = this.layer.clientHeight - pr.height - 8;
-        left = Math.min(Math.max(left, 8), Math.max(8, maxLeft));
-        top = Math.min(Math.max(top, 8), Math.max(8, maxTop));
+        // 锚点在视口里 → 换算到 .mm-root 的坐标系
+        let top = (a.preferAbove ? a.top - 8 - pr.height : a.bottom + 4) - layerRect.top;
+
+        // 摆不下就翻面。两侧都摆不下时才退回「原侧 + 钳制」——
+        // 那种情况说明画布本身就很矮，至少保证浮层完整可见（钳制会盖住光标，但不会缺一块）
+        if (!a.preferAbove) {
+            if (top + pr.height > layerH - PAD) {
+                const flipped = a.top - 8 - pr.height - layerRect.top;
+                if (flipped >= PAD) top = flipped;
+            }
+        } else if (top < PAD) {
+            const flipped = a.bottom + 4 - layerRect.top;
+            if (flipped + pr.height <= layerH - PAD) top = flipped;
+        }
+
+        let left = a.x - layerRect.left;
+        const maxLeft = layerW - pr.width - PAD;
+        const maxTop = layerH - pr.height - PAD;
+        left = Math.min(Math.max(left, PAD), Math.max(PAD, maxLeft));
+        top = Math.min(Math.max(top, PAD), Math.max(PAD, maxTop));
         pop.style.left = `${Math.round(left)}px`;
         pop.style.top = `${Math.round(top)}px`;
     }

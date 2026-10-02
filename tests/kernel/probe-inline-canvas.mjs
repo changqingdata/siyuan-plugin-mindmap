@@ -17,6 +17,7 @@
  *   E 打 `/` → 斜杠菜单出现 → 选「超链接」→ 填地址 → 内核里出现 `](http`
  *   F 打 `[[` → 块引用搜索出现 → 搜到候选 → 挑一条 → 内核里出现 `((`；
  *     插入后接着敲字，字要落在双链**外面**（`caretAfterNode` 的回归）
+ *   I 编辑着 A 时点 A 的悬停 `+` 加子节点 → 焦点要跟到新节点（`revealAndEdit` 的回归）
  *   H 每个场景结束后浮层都要收干净（不能留下没人管的浮层）
  *   G 红线：跑完全程，磁盘 `.sy` 里 `contenteditable=` 计数必须是 **0**
  *     （自绘 UI 的事件冒泡到 Protyle 会让宿主从 DOM 重序列化该块，
@@ -37,6 +38,14 @@
  *     但含格式的节点插件已经把光标落在所有子节点之后了，再按 `→` 会被 Chrome
  *     **归一化到最后一个行内元素的文本节点内部** —— 接着敲的字变成那个双链的锚文本。
  *     所以 `→` 只在「选区非 collapsed」时才补。同一条也解释了场景 C 曾经的假红。
+ *  5. **只断言「浮层出现了」是不够的，还要断言「它摆在哪儿」**：场景 E / F 一开始只查
+ *     `pops > 0` 和「焦点在不在浮层输入框」，于是「块引用搜索框跑到画布左上角」
+ *     一路绿着发到了用户手里。现在用 `anchorCheck` 把「浮层必须被显式定位过 +
+ *     横向贴着正在编辑的节点 + **四边都在画布内**」钉住。
+ *     ⚠️ 这条断言补了两轮才齐：第二轮只查了**上**边界，于是「浮层长高之后被
+ *     `.mm-root` 的 `overflow: hidden` 裁掉底部」又漏了（`anchorCheck` 的注释里
+ *     有完整记录）。教训：「在画布内」必须查**四条边**；而且**合法的钳制不能算红** ——
+ *     浮层贴着画布右边缘是正确的，用「左边缘落在某个窗口里」当判据会误伤。
  *
  * 用法：node tests/kernel/probe-inline-canvas.mjs
  */
@@ -82,6 +91,8 @@ const docRes = await api("/api/filetree/createDocWithMd", {
         "    - 丙一 · 前缀",
         "  - 场景丁 · 块引用搜索",
         "    - 丁一 · 前缀",
+        "  - 场景戊 · 编辑态里新建子节点",
+        "    - 戊一 · 先被编辑的节点",
         "",
     ].join("\n"),
 });
@@ -173,9 +184,17 @@ const SNAP = `JSON.stringify((() => {
     const root = ${ROOT};
     const ed = root && root.querySelector('.mm-node[data-mm-editing]');
     const txt = ed && ed.querySelector('.mm-txt');
+    const pop = root && root.querySelector('.mm-inline-pop');
+    const R = (el) => {
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { l: Math.round(r.left), t: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
+    };
     return {
         root: !!root,
         editing: !!ed,
+        // 同时有**几个**节点挂着编辑态标记 —— 「插入即编辑」必须保证只剩一个
+        editingCount: root ? root.querySelectorAll('.mm-node[data-mm-editing]').length : -1,
         html: txt ? txt.innerHTML : null,
         text: txt ? (txt.textContent || '').trim().slice(0, 48) : null,
         refs: txt ? txt.querySelectorAll('[data-type="block-ref"]').length : -1,
@@ -189,6 +208,11 @@ const SNAP = `JSON.stringify((() => {
         formInputs: root ? root.querySelectorAll('.mm-inline-pop.mm-form .mm-form-input').length : -1,
         active: document.activeElement ? (document.activeElement.className || document.activeElement.tagName).toString().slice(0, 40) : null,
         sel: (window.getSelection && window.getSelection().toString() || '').slice(0, 30),
+        // ---- 几何：浮层定位的回归判据（第一版整支探针只看「有没有浮层」，漏掉了「摆在哪」）----
+        rootRect: R(root),
+        txtRect: R(txt),
+        popRect: R(pop),
+        popStyle: pop ? (pop.style.left || "(空)") + " / " + (pop.style.top || "(空)") : null,
         // 编辑态下的光标是否已收成一点（「全选」= false）。非编辑态给 null，免得蒙成绿的
         caretCollapsed: ed ? (() => {
             const s = window.getSelection();
@@ -234,6 +258,53 @@ const outsidePoint = (page) =>
         const r = vp.getBoundingClientRect();
         return { x: Math.round(r.right - 14), y: Math.round(r.bottom - 14) };
     })()`);
+
+/**
+ * 浮层是不是「贴着光标」。
+ *
+ * ⚠️ **这条断言是补出来的，而且补了两次。**
+ *
+ * 第一版只断言了「浮层有没有出现」（`pops > 0`）和「焦点在不在浮层输入框里」，
+ * **完全没看它摆在哪儿** —— 于是「块引用搜索框跑到画布左上角」这个 bug
+ * 一路绿着发到了用户手里。
+ *
+ * 第二版加了「横向位置要落在节点的跨度里」，又把「浮层长高之后越出 `.mm-root`
+ * 被 `overflow: hidden` 裁掉一块」放了过去 —— 因为那条只查了**上边界**，
+ * 而裁掉的是**下边界**。修完之后探针自己反而红了：浮层被右边界钳到 1166px，
+ * 而「左边缘必须落在 1168px 之后」这个窗口太紧 —— 钳制是**正确行为**，不是 bug。
+ *
+ * 所以现在四条一起查（缺哪条都漏过过真 bug）：
+ *   ① 必须被**显式定位**过（`style.left` / `style.top` 不能空）——
+ *      绝对定位元素不设偏移时会停在「静态位置」，也就是包含块内容盒的左上角；
+ *   ② **四边**都要在画布内 —— 只查上边界会漏掉「底部被裁」；
+ *   ③ 横向要和正在编辑的节点**有交集**（被左右边界钳制也算锚定）；
+ *   ④ 双保险：不能整块缩在画布左上角（那正是「静态位置」的样子）。
+ *
+ * ③ 用「有交集」而不是「左边缘落在窗口里」，就是为了让合法的钳制不算红。
+ */
+const anchorCheck = (s) => {
+    const p = s.popRect;
+    const t = s.txtRect;
+    const r = s.rootRect;
+    if (!p || !t || !r) return { ok: false, why: `缺几何 pop=${!!p} txt=${!!t} root=${!!r}` };
+    const positioned = !!s.popStyle && !s.popStyle.includes("(空)");
+    // 浮层比画布还高时，底部越界是**物理上不可避免**的（钳制只能保上边界），
+    // 这时不查下边界 —— 免得以后把画布改矮了、探针反而给出假红
+    const tooTall = p.h > r.h - 16;
+    const inside =
+        p.l >= r.l - 1 &&
+        p.t >= r.t - 1 &&
+        p.l + p.w <= r.l + r.w + 1 &&
+        (tooTall || p.t + p.h <= r.t + r.h + 1);
+    const overlapX = p.l < t.l + t.w + 40 && p.l + p.w > t.l - 24;
+    const notCorner = !(p.l <= r.l + 12 && p.t <= r.t + 12);
+    return {
+        ok: positioned && inside && overlapX && notCorner,
+        why:
+            `定位=${s.popStyle} 在画布内=${inside} 横向有交集=${overlapX} 不在左上角=${notCorner}` +
+            ` 锚点=${JSON.stringify(t)} 浮层=${JSON.stringify(p)} 根=${JSON.stringify(r)}`,
+    };
+};
 
 /**
  * 双击进入编辑态，并把光标落到文字末尾。
@@ -341,6 +412,10 @@ try {
     await sleep(700);
     s = await snap(page);
     check("E 打「空格 + /」后斜杠菜单出现", s.slash > 0, `可见候选数=${s.slash} pops=${s.pops}`);
+    {
+        const g = anchorCheck(s);
+        check("E 斜杠菜单贴在光标处（没有被丢到画布左上角）", g.ok, g.why);
+    }
     await page.type("链接");
     await sleep(600);
     s = await snap(page);
@@ -372,6 +447,10 @@ try {
     await sleep(900);
     s = await snap(page);
     check("F 打 [[ 后块引用搜索浮层出现", s.pops > 0 && /mm-ref-input/.test(s.active || ""), `pops=${s.pops} active=${s.active}`);
+    {
+        const g = anchorCheck(s);
+        check("F 块引用搜索浮层贴在光标处（这是「跑到画布左上角」的回归）", g.ok, g.why);
+    }
     await page.type("画布");
     await sleep(1600);
     s = await snap(page);
@@ -408,6 +487,47 @@ try {
         /\)\)\s*尾|\)\)尾/.test(kd.split("\n")[0]),
         `kramdown=${JSON.stringify(kd.split("\n")[0])}`,
     );
+
+    /* ============================================================ I 编辑态里新建子节点 → 焦点要跟过去 */
+    //
+    // 用户的场景：正在编辑 A，点 A 的悬停 `+` 加子节点（那一下刻意不让 `.mm-txt` 失焦），
+    // 新节点建出来了，**光标却还留在 A 里** —— 只有退出编辑才看得见新节点。
+    //
+    // 根因：`render()` 在编辑态下只记一笔 `pendingRender` 就返回，新节点进不了 `byId`，
+    // 于是 `revealAndEdit` 直接返回 false。修法见 `revealAndEdit`（先收掉旧编辑 + 同步重建）。
+    await enterEdit(page, "戊一");
+    s = await snap(page);
+    check("I 准备态：已进入「戊一」的编辑态", s.editing && (s.text || "").includes("戊一"), `text=「${s.text}」`);
+
+    const plus = await page.eval(`(() => {
+        const ed = document.querySelector('.mm-root .mm-node[data-mm-editing]');
+        const b = ed && ed.querySelector('.mm-acts button');
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    check("I 编辑态的节点上能拿到悬停「+」按钮", !!plus, `按钮位置=${JSON.stringify(plus)}`);
+    if (plus) {
+        await tap(page, plus.x, plus.y);
+        // 内核写回 → Protyle 重建 DOM → 重挂视图 → 兑现 pendingEdit，整条链是异步的
+        await sleep(3000);
+        s = await snap(page);
+        check(
+            "I 新建子节点后焦点跟到新节点（不再留在被编辑的旧节点里）",
+            s.editing && (s.text || "").includes("新节点"),
+            `editing=${s.editing} text=「${s.text}」 active=${s.active}`,
+        );
+        check("I 同一时刻只有一个节点处于编辑态", s.editingCount === 1, `editingCount=${s.editingCount}`);
+        check("I 焦点确实在编辑框里（能直接开始打字）", /mm-txt/.test(s.active || ""), `active=${s.active}`);
+
+        // 直接打字就该是给新节点命名 —— 这是「插入即编辑」的全部意义
+        await page.type("戊二");
+        await sleep(300);
+        await page.press("Enter");
+        await sleep(1600);
+        const wuEr = await findItem("戊二");
+        check("I 直接打字就写进了新节点", !!wuEr, wuEr ? "" : "内核里找不到「戊二」");
+    }
 
     /* ============================================================ H 浮层收干净 */
     s = await snap(page);
